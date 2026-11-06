@@ -1,0 +1,33 @@
+id: admin-passwords-changed
+version: 1.0.0
+name: Domain admin passwords changed
+summary: Every Tier 0 admin password was reset by an intruder, who left a domain admin account behind
+category: Identity
+difficulty: 3
+destructive: false
+authors:
+  - Wesley Reynolds
+tags: [incident-response, privileged-accounts, persistence, audit]
+
+requires:
+  cert: ">=0.1"
+  lab: ">=1.5"
+  roles:
+    DC: 1
+  assessor: true
+
+targets:
+  - name: dc
+    select: pdc
+
+engagement:
+  access: domain-admin       # the "break-glass" account the owner still has
+  briefing: briefing.md
+
+# Lab validation can't see a password; the module's own checks can.
+settle_seconds: 30
+expected_failures: []
+
+break: break.ps1
+verify: verify.ps1
+solution: solution.md

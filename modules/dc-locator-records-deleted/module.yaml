@@ -1,0 +1,33 @@
+id: dc-locator-records-deleted
+version: 1.0.0
+name: DC locator records deleted
+summary: The SRV records clients use to find a domain controller are gone from AD-integrated DNS
+category: DNS
+difficulty: 2
+destructive: false
+authors:
+  - Wesley Reynolds
+tags: [dns, srv, netlogon, msdcs]
+
+requires:
+  cert: ">=0.1"
+  lab: ">=1.5"
+  roles:
+    DC: 1
+  assessor: true
+
+targets:
+  - name: dcs
+    select: all-dcs
+
+engagement:
+  access: domain-admin
+  briefing: briefing.md
+
+settle_seconds: 120
+expected_failures:
+  - DNS-002
+
+break: break.ps1
+verify: verify.ps1
+solution: solution.md

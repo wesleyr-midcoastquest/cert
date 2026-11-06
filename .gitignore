@@ -1,0 +1,12 @@
+# This MGMT's settings, and what runs leave behind
+cert.config.yaml
+runs/
+cert-runs/
+CERT.lock
+module-state.json
+
+# Extra module sources are cloned here
+sources/
+
+# Never
+*.kdbx

@@ -1,0 +1,46 @@
+name: check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: wesleyr-midcoastquest/midcoast-labs
+          path: midcoast-labs
+
+      - name: Install powershell-yaml
+        shell: pwsh
+        run: Install-Module powershell-yaml -Scope CurrentUser -Force
+
+      - name: Every PowerShell file parses
+        shell: pwsh
+        run: |
+          $bad = 0
+          Get-ChildItem -Recurse -Include *.ps1, *.psm1 -Exclude midcoast-labs | Where-Object FullName -notlike '*midcoast-labs*' | ForEach-Object {
+            $t = $null; $e = $null
+            [void] [Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref] $t, [ref] $e)
+            foreach ($x in $e) { $bad++; "::error file=$($_.FullName),line=$($x.Extent.StartLineNumber)::$($x.Message)" }
+          }
+          if ($bad) { exit 1 }
+
+      - name: Modules
+        shell: pwsh
+        run: ./tools/Test-CertModule.ps1 -LabRoot ./midcoast-labs
+
+      - name: Offline tests
+        shell: pwsh
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name ci
+          ./tests/Run-Tests.ps1 -LabRoot ./midcoast-labs
+
+      - name: shellcheck
+        run: shellcheck tools/*.sh

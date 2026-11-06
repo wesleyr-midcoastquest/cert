@@ -1,0 +1,47 @@
+# CERT settings. These are the defaults. To change one on your MGMT, copy
+# this file to cert.config.yaml (gitignored, so updates never touch it) and
+# keep only the lines you change.
+
+# The lab repo on this MGMT. CERT reads inventory/lab.yaml, inventory/site.yaml
+# and inventory/instances.yaml from it, and never writes to it.
+lab_repo: C:\MidCoastLab\repo
+
+# One folder per run (run.json, report.md). Relative paths are under the CERT folder.
+runs_path: C:\MidCoastLab\cert-runs
+
+# Present while a run is open: names the run. One run at a time.
+lock_path: C:\MidCoastLab\CERT.lock
+
+# The machine the fixer works from. It never needs MGMT.
+assessor:
+  role: W11                 # the lab role whose active instance is the assessor
+  # address: 10.42.17.40    # or a fixed address, for a machine the lab doesn't build
+  # What a run opens on every machine in the snapshot set, from the assessor
+  # only (the lab normally allows WinRM from MGMT only). The revert removes it.
+  allow:
+    - winrm-https           # 5986
+    - winrm-http            # 5985 (Enter-PSSession's default; Kerberos still encrypts it)
+    - rdp                   # 3389
+    - icmp                  # ping
+  # Networks allowed Remote Desktop to the assessor itself during a run (how
+  # the fixer gets to it). Empty: whatever the assessor already allows.
+  rdp_from: []
+
+snapshot:
+  # Never MGMT (it holds the run, the vault and the ledger), whatever this says.
+  # Add W11 here to keep the assessor (and tools installed on it) out of the
+  # revert.
+  exclude_roles:
+    - MGMT
+  include_ram: true         # the revert resumes each VM where it was, instead of booting it
+  storage_warn_percent: 80  # warn before a run when the VM storage is this full
+  max_sets: 3               # refuse to start a run while this many CERT sets exist
+
+# Extra module repos, besides this repo's modules/ folder. Each is cloned under
+# sources/<name> the first time you update, and only ever fast-forwarded after
+# you've seen what's new.
+sources: []
+#  - name: community
+#    url: https://github.com/<someone>/cert-modules.git
+#    ref: main
+#    path: modules

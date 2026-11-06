@@ -1,0 +1,39 @@
+id: fsmo-holder-lost
+version: 1.0.0
+name: FSMO role holder lost
+summary: The DC holding the FSMO roles is gone for good; restore full function on the DCs that are left
+category: ActiveDirectory
+difficulty: 3
+destructive: true
+authors:
+  - Wesley Reynolds
+tags: [fsmo, seize, metadata-cleanup, dns]
+
+requires:
+  cert: ">=0.1"
+  lab: ">=1.5"
+  roles:
+    DC: 2
+  assessor: true
+
+targets:
+  - name: victim
+    select: pdc            # the PDC emulator; in this lab it holds all five roles
+
+engagement:
+  access: domain-admin
+  briefing: briefing.md
+
+# The victim is switched off, so it can't validate itself.
+exclude_from_validation: [victim]
+
+# dcdiag's FsmoCheck and the FSMO reachability check fail on the survivors
+# within a few minutes; replication errors (REPL-001) follow later.
+settle_seconds: 180
+expected_failures:
+  - FSMO-001
+  - AD-003
+
+break: break.ps1
+verify: verify.ps1
+solution: solution.md

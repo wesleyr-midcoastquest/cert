@@ -1,0 +1,35 @@
+id: dc-time-skew
+version: 1.0.0
+name: DC clock skewed
+summary: A domain controller's clock is 17 minutes fast and no longer syncs; Kerberos and replication fail
+category: Time
+difficulty: 2
+destructive: false
+authors:
+  - Wesley Reynolds
+tags: [time, w32time, kerberos, replication]
+
+requires:
+  cert: ">=0.1"
+  lab: ">=1.5"
+  roles:
+    DC: 2
+  assessor: true
+
+targets:
+  - name: victim
+    select: non-pdc-dc
+
+engagement:
+  access: domain-admin
+  briefing: briefing.md
+
+# The time source check fails at once; replication errors follow at the next
+# replication attempt.
+settle_seconds: 240
+expected_failures:
+  - TIME-001
+
+break: break.ps1
+verify: verify.ps1
+solution: solution.md
