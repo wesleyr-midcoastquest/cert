@@ -262,6 +262,45 @@ Assert 'pre-flight refuses while a run is open' { -not $pf.Ok -and @($pf.Errors 
 Remove-Item $config.lock_path
 Assert 'with no run open, the set can be removed' { (Remove-CertSnapshotSet -Config $config -Lab $L -Name $snapName -Confirm:$false) -like 'Removed*' }
 
+Write-Host 'Reaching guests (fake WinRM)'
+$realCreds = & $cert { ${function:Get-CertCredentials} }
+& $cert {
+    $script:FakeTcp = $false; $script:FakeLogon = $null; $script:FakeMacs = @('', 'BC2411000001')
+    function script:Get-CertCredentials { param($Lab) foreach ($u in 'LAB\Administrator', 'LAB\svc-labdeploy') { [pscredential]::new($u, (ConvertTo-SecureString 'x' -AsPlainText -Force)) } }
+    function script:Test-Connection { param($TargetName, $TcpPort, $TimeoutSeconds, [switch] $Quiet) $script:FakeTcp }
+    function script:New-PSSession { param($ComputerName, $Port, [switch] $UseSSL, $Authentication, $Credential, $SessionOption, $ErrorAction) if ($script:FakeLogon) { throw $script:FakeLogon }; [pscustomobject]@{ Fake = $ComputerName } }
+    function script:Invoke-Command { param($Session, $ScriptBlock, $ArgumentList, $ErrorAction) if ($ScriptBlock.ToString() -match 'Get-NetAdapter') { $script:FakeMacs } elseif ($ScriptBlock.ToString() -match 'ran') { 'ran' } }
+    function script:Remove-PSSession { param($Session, $ErrorAction) }
+}
+$dc0 = $L.Instances | Where-Object name -eq 'DC-261101-00'
+$dc1 = $L.Instances | Where-Object name -eq 'DC-261101-01'
+$s = Connect-CertGuest -Lab $L -Instance $dc0
+$p = Get-CertConnectProblem
+Assert 'a port that does not answer: no session, and the reason' { $null -eq $s -and $p -like "1 attempt(s) in * s: 10.50.10.10: port 5986 didn't answer" }
+& $cert { $script:FakeTcp = $true; $script:FakeLogon = 'Access is denied.' }
+$s = Connect-CertGuest -Lab $L -Instance $dc0
+$p = Get-CertConnectProblem
+Assert 'a refused logon: each account and the reason' { $null -eq $s -and $p -like '*LAB\Administrator @ 10.50.10.10: Access is denied.*' -and $p -like '*LAB\svc-labdeploy @ 10.50.10.10: Access is denied.*' }
+& $cert { $script:FakeLogon = $null; $script:FakeMacs = @('AABBCCDDEEFF') }
+$s = Connect-CertGuest -Lab $L -Instance $dc0 3>$null
+Assert 'another machine at the address: says whose MAC' { $null -eq $s -and (Get-CertConnectProblem) -like "*answers, but it isn't DC-261101-00: its MACs are AABBCCDDEEFF, not BC2411000001*" }
+& $cert { $script:FakeMacs = @('', 'BC2411000001') }
+Assert 'the right machine (an adapter without a MAC, like Tailscale, is fine)' { $null -ne (Connect-CertGuest -Lab $L -Instance $dc0) }
+Assert 'Invoke-CertTarget takes -TimeoutSeconds (sysvol verify uses it)' { (Invoke-CertTarget -Context ([pscustomobject]@{ Lab = $L }) -Instance $dc0 -TimeoutSeconds 1 -ScriptBlock { 'ran' }) -eq 'ran' }
+Assert 'every target answering: how long each took' { (Wait-CertGuests -Lab $L -Instances @($dc0, $dc1) -TimeoutSeconds 0) -match '^DC-261101-00 \d+ s, DC-261101-01 \d+ s$' }
+& $cert { $script:FakeTcp = $false }
+Assert-Throws "Can't reach says why" { Invoke-CertGuest -Lab $L -Instance $dc0 -TimeoutSeconds 0 -ScriptBlock { 'ran' } } "*Can't reach DC-261101-00*port 5986 didn't answer*"
+Assert-Throws 'a target that does not answer stops the wait, with the reason' { Wait-CertGuests -Lab $L -Instances @($dc0) -TimeoutSeconds 0 } "*DC-261101-00 (10.50.10.10) didn't answer*within 0 s*port 5986*"
+$failedRun = [pscustomobject]@{ id = 'CERT-261123-1649-00'; state = 'BreakFailed'; blind = $false; timeline = @(); updated_utc = $null }
+$timeMod = @($mods | Where-Object Id -eq 'dc-time-skew')[0]
+Assert 'a failed break is not checked' { -not (Test-CertBreak -Config $config -Lab $L -Run $failedRun -Module $timeMod 3>$null) -and @($failedRun.timeline).Count -eq 0 }
+Assert-Throws 'nor handed to the clock' { Start-CertClock -Config $config -Run $failedRun } '*BreakFailed*'
+& $cert {
+    param($c)
+    foreach ($n in 'Test-Connection', 'New-PSSession', 'Invoke-Command', 'Remove-PSSession') { Remove-Item "function:$n" }
+    Set-Item function:script:Get-CertCredentials $c
+} $realCreds
+
 Write-Host 'SYSVOL after a revert (fake guests)'
 & $cert {
     $script:GuestLog = [Collections.Generic.List[string]]::new()

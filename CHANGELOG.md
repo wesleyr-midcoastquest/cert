@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.5 (Nov 2026): wait for the targets before breaking
+
+- **Before the break, CERT waits (up to 5 minutes) until every target
+  answers WinRM again.** On a test lab, one DC (the one running Tailscale)
+  stopped answering for at least a minute right after the setup step, which
+  changes each machine's firewall. The break couldn't connect, so dc-time-skew
+  never broke anything. Why it stops answering isn't known yet; the
+  timeline's new `targets ready` event says how long each target took.
+- The break itself keeps trying to connect for 5 minutes, not 60 seconds.
+- **"Can't reach" says why**: a port that didn't answer, a refused logon
+  (with Windows' reason), or a machine with another VM's MAC, and how many
+  attempts over how long.
+- **A failed break is its own state, `BreakFailed`.** Before, the run looked
+  normal: "Check the break took" ran and reported expected failures as
+  "not seen yet", as if the break might still show. Now the menu says the
+  break failed and to revert; the check, the handover and the clock refuse.
+- `Invoke-CertTarget` takes `-TimeoutSeconds`. sysvol-replication-disabled's
+  `verify.ps1` already passed it, so that call threw every time: its
+  `sysvol-change-arrives` check could never pass.
+
 ## 0.2.4 (Nov 2026): SYSVOL after a revert
 
 - **Every revert now ends with an authoritative SYSVOL sync from the PDC

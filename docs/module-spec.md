@@ -89,7 +89,7 @@ Helpers:
 
 | Helper | Does |
 |---|---|
-| `Invoke-CertTarget -Context $Context -Instance <target> -ScriptBlock { ... } [-ArgumentList ...]` | runs code on a lab machine, over WinRM/HTTPS as a lab domain admin |
+| `Invoke-CertTarget -Context $Context -Instance <target> -ScriptBlock { ... } [-ArgumentList ...] [-TimeoutSeconds n]` | runs code on a lab machine, over WinRM/HTTPS as a lab domain admin. Keeps trying to connect for `-TimeoutSeconds` (default 300 in `break.ps1`, 60 elsewhere) |
 | `Stop-CertTarget -Context $Context -Instance <target>` | hard power-off (pulled plug) |
 | `Set-CertTargetLink -Context $Context -Instance <target> -Up $false` | unplugs the network (`$true` plugs it back) |
 | `Save-CertModuleState -Context $Context -State @{...}` / `Get-CertModuleState -Context $Context` | remembers what the break did (GUIDs, times, account names), for verify |
