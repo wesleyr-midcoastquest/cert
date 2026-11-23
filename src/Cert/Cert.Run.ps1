@@ -195,6 +195,11 @@ function Test-CertPreflight {
     }
 
     $baseline = @()
+    # A failure left over from the snapshot window (the DCs are unplugged while
+    # it's taken) would fail REPL-001; pull everything before judging the lab.
+    if (-not $SkipBaseline -and $err.Count -eq 0 -and @($vms | Where-Object { $_.Instance.role -eq 'DC' }).Count -gt 1) {
+        try { Write-Host "  replication: $(Sync-CertDcReplication -Lab $Lab)" } catch { $warn.Add("Couldn't sync replication first: $($_.Exception.Message)") }
+    }
     if (-not $SkipBaseline -and $err.Count -eq 0) {
         foreach ($v in $vms) {
             if (-not (Test-CertGuestReachable -Lab $Lab -Instance $v.Instance)) { $err.Add("Can't reach $($v.Instance.name) over WinRM/HTTPS."); continue }
@@ -354,12 +359,20 @@ function Sync-CertDcReplication {
         $r = Invoke-CertGuest -Lab $Lab -Instance $d -TimeoutSeconds 300 -ScriptBlock {
             Import-Module ActiveDirectory
             $ok = 0; $bad = @()
-            foreach ($m in @(Get-ADReplicationPartnerMetadata -Target $env:COMPUTERNAME -PartnerType Inbound -Partition *)) {
-                $text = (& repadmin.exe /replicate $env:COMPUTERNAME $m.PartnerAddress $m.Partition 2>&1 | Where-Object { $_ }) -join ' '
-                if ($LASTEXITCODE -eq 0 -and $text -match 'completed successfully') { $ok++ } else { $bad += "$($m.Partition): $text" }
+            # Every naming context the DC holds, from every inbound partner:
+            # -Partition * leaves out the DNS application partitions.
+            $partners = @(Get-ADReplicationPartnerMetadata -Target $env:COMPUTERNAME -PartnerType Inbound -Partition * | ForEach-Object PartnerAddress | Sort-Object -Unique)
+            foreach ($nc in @((Get-ADRootDSE -Server localhost).namingContexts)) {
+                foreach ($p in $partners) {
+                    $text = (& repadmin.exe /replicate $env:COMPUTERNAME $p $nc 2>&1 | Where-Object { $_ }) -join ' '
+                    if ($LASTEXITCODE -eq 0 -and $text -match 'completed successfully') { $ok++ } else { $bad += "${nc}: $text" }
+                }
             }
-            $left = @(Get-ADReplicationFailure -Target $env:COMPUTERNAME -Scope Server -ErrorAction SilentlyContinue | Where-Object { $_.FailureCount -gt 0 } |
-                ForEach-Object { "$($_.Partner -replace '^CN=NTDS Settings,CN=([^,]+).*', '$1') error $($_.LastError)" })
+            # Each link's own failure count, as the lab's REPL-001 reads it (not
+            # Get-ADReplicationFailure's cache, which a success doesn't clear).
+            $left = @(& repadmin.exe /showrepl $env:COMPUTERNAME /csv 2>$null | ConvertFrom-Csv |
+                Where-Object { $_.'Number of Failures' -match '^\d+$' -and [int] $_.'Number of Failures' -gt 0 } |
+                ForEach-Object { "$($_.'Source DSA') ($($_.'Naming Context')) status $($_.'Last Failure Status')" })
             [pscustomobject]@{ Ok = $ok; Bad = $bad; Left = $left }
         }
         $line = "$($d.name): $([int] $r.Ok) partition(s) pulled"

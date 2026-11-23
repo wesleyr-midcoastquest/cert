@@ -15,6 +15,11 @@
   running and how long it took, then the module's own checks. With a DC
   down, the lab's validation on the survivor took many minutes with nothing
   on screen.
+- **The replication sync covers every naming context**, the DNS application
+  partitions included (`Get-ADReplicationPartnerMetadata -Partition *` leaves
+  them out), and reports what's still failing from each link's own count
+  (`repadmin /showrepl /csv`), as the lab's REPL-001 does from
+  LAB-261123-00. **Pre-flight runs it** before validating the lab.
 - **The PDC lookup asks DCs Proxmox shows as running first**, so a scenario's
   switched-off DC no longer costs a minute in every check.
 
