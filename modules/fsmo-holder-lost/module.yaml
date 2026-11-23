@@ -1,5 +1,5 @@
 id: fsmo-holder-lost
-version: 1.0.0
+version: 1.0.1
 name: FSMO role holder lost
 summary: The DC holding the FSMO roles is gone for good; restore full function on the DCs that are left
 category: ActiveDirectory

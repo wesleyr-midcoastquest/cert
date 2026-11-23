@@ -1,5 +1,5 @@
 id: gpo-deleted
-version: 1.0.0
+version: 1.0.1
 name: GPO deleted
 summary: The DCs' LAPS/DSRM policy was deleted; a recent GPO backup exists on the PDC
 category: GroupPolicy

@@ -9,28 +9,34 @@ lab_repo: C:\MidCoastLab\repo
 # One folder per run (run.json, report.md). Relative paths are under the CERT folder.
 runs_path: C:\MidCoastLab\cert-runs
 
-# Present while a run is open: names the run. One run at a time.
+# Present while a run is open: names the run. One run at a time. The lab's
+# pipeline (1.6+) refuses to change the lab while it exists; keep it the same as
+# lab.yaml's handover.cert_lock_path.
 lock_path: C:\MidCoastLab\CERT.lock
 
-# The machine the fixer works from. It never needs MGMT.
+# Where the fixer works. By default MGMT itself: the fixer signs in to MGMT
+# (Remote Desktop) with the engagement account and works from there. MGMT is
+# never in the snapshot, so whatever the fixer changes on MGMT survives the
+# revert; CERT removes only the engagement account's own traces (its sessions,
+# its profile, any Remote Desktop grant it gave).
 assessor:
-  role: W11                 # the lab role whose active instance is the assessor
+  role: MGMT                # or W11: the fixer works on that lab machine instead
+                            # (falls back to MGMT while there's no active one)
   # address: 10.42.17.40    # or a fixed address, for a machine the lab doesn't build
   # What a run opens on every machine in the snapshot set, from the assessor
-  # only (the lab normally allows WinRM from MGMT only). The revert removes it.
+  # only. The revert removes it. MGMT already has WinRM over HTTPS (5986) and
+  # Remote Desktop to the DCs; most tools default to WinRM over HTTP (5985).
   allow:
-    - winrm-https           # 5986
+    - winrm-https           # 5986 (already open from MGMT)
     - winrm-http            # 5985 (Enter-PSSession's default; Kerberos still encrypts it)
     - rdp                   # 3389
     - icmp                  # ping
-  # Networks allowed Remote Desktop to the assessor itself during a run (how
-  # the fixer gets to it). Empty: whatever the assessor already allows.
+  # Only for an assessor that is itself in the snapshot set (a W11): networks
+  # allowed Remote Desktop to it during a run. Never applied to MGMT.
   rdp_from: []
 
 snapshot:
   # Never MGMT (it holds the run, the vault and the ledger), whatever this says.
-  # Add W11 here to keep the assessor (and tools installed on it) out of the
-  # revert.
   exclude_roles:
     - MGMT
   include_ram: true         # the revert resumes each VM where it was, instead of booting it

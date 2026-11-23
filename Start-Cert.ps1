@@ -35,7 +35,8 @@ function Show-Header($Config, $Lab, $Run) {
     Write-Host "CERT $(Get-CertVersion): break/fix scenarios" -ForegroundColor Cyan
     Write-Host "Lab:  $($Lab.Site), $($Lab.Release) (compatibility $($Lab.Version)); $(@(Get-CertActiveInstances -Lab $Lab).Count) active machines"
     $a = Get-CertAssessor -Config $Config -Lab $Lab
-    Write-Host "Assessor: $(if ($a) { "$($a.Name) ($($a.Address))" } else { 'none (no active ' + $Config.assessor.role + ', no assessor.address)' })"
+    $where = if (-not $a) { 'nowhere (no active MGMT in the ledger)' } elseif ($a.IsMgmt) { "MGMT, $($a.Name) ($($a.Address))$(if ($a.Fallback) { "; no active $($Config.assessor.role)" })" } else { "$($a.Name) ($($a.Address))" }
+    Write-Host "Fixer works on: $where"
     if ($Run) {
         $what = if ($Run.blind) { '(hidden: blind run)' } else { "$($Run.module.name) [$($Run.module.id) $($Run.module.version)]" }
         Write-Host "Open run: $($Run.id), $what, $($Run.state)" -ForegroundColor Yellow
@@ -60,7 +61,11 @@ function Show-Handover($Config, $Lab, $Run, $Module) {
     $b = Join-Path $Module.Path $Module.Manifest.engagement.briefing
     Get-Content -Path $b | ForEach-Object { Write-Host "  $_" }
     Write-Host ''
-    if ($Run.assessor) { Write-Host "  Work from: $($Run.assessor.name) ($($Run.assessor.address))" }
+    if ($Run.assessor) { Write-Host "  Work from: $($Run.assessor.name) ($($Run.assessor.address)), by Remote Desktop" }
+    if ($Run.assessor.is_mgmt) {
+        Write-Host '  Note:      this is the lab''s management server. Its own settings, the'
+        Write-Host '             C:\MidCoastLab folder and the pipeline are out of scope: leave them as they are.'
+    }
     if ($Run.engagement.account) {
         Write-Host "  Account:   $($Run.engagement.account)  (UPN $($Run.engagement.upn))"
         Write-Host "  Password:  $($Run.engagement.password)"

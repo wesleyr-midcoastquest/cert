@@ -1,5 +1,5 @@
 id: dc-locator-records-deleted
-version: 1.0.0
+version: 1.0.1
 name: DC locator records deleted
 summary: The SRV records clients use to find a domain controller are gone from AD-integrated DNS
 category: DNS

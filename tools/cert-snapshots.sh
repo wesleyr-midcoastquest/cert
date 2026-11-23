@@ -10,7 +10,8 @@
 #   cert-snapshots.sh prune --older-than <days> [--dry-run]
 #
 # Options:
-#   --tag <tag>     which VMs count as lab VMs (default: midcoast-lab)
+#   --tag <tag>     which VMs count as lab VMs (default: midcoast-lab and every
+#                   per-site midcoast-lab-<site> tag, so all labs on the cluster)
 #   --all-vms       look at every VM on the cluster, tagged or not
 #   --yes           don't ask (for cron); prune and remove otherwise ask you
 #                   to type the set name, or PRUNE
@@ -20,7 +21,7 @@
 # owner first.
 set -euo pipefail
 
-TAG="midcoast-lab"
+TAG=""
 ALL=0
 DRY=0
 YES=0
@@ -55,8 +56,10 @@ for v in pvesh("/cluster/resources?type=vm"):
     if v.get("type") != "qemu" or v.get("template"):
         continue
     tags = [t for t in str(v.get("tags", "")).replace(",", ";").split(";") if t]
-    if not allvms and tag not in tags:
-        continue
+    if not allvms:
+        mine = (tag in tags) if tag else any(t == "midcoast-lab" or t.startswith("midcoast-lab-") for t in tags)
+        if not mine:
+            continue
     for s in pvesh(f"/nodes/{v['node']}/qemu/{v['vmid']}/snapshot"):
         name = s.get("name", "")
         if name.startswith("CERT-"):
@@ -66,7 +69,7 @@ PY
 
 list_sets() {
   local rows; rows="$(collect | sort)"
-  if [[ -z "$rows" ]]; then echo "No CERT snapshot sets$( [[ $ALL -eq 1 ]] || echo " on VMs tagged $TAG")."; return; fi
+  if [[ -z "$rows" ]]; then echo "No CERT snapshot sets$( [[ $ALL -eq 1 ]] || echo " on VMs tagged ${TAG:-midcoast-lab*}")."; return; fi
   printf '%-22s %-17s %-4s %s\n' "SET" "TAKEN (UTC)" "RAM" "VMS"
   awk -F'\t' '
     { key=$1; vms[key]=vms[key] (vms[key]?", ":"") $4 " (" $3 "@" $2 ")"; t[key]=$5; ram[key]=$6 }

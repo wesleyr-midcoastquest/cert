@@ -27,6 +27,9 @@ function Connect-CertGuest {
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
         $addresses = @(@($Instance.ipv4) + @(Get-CertPveVmAddress -Lab $Lab -Vm $vm) | Where-Object { $_ } | Select-Object -Unique)
+        # MGMT reaching itself (the assessor is MGMT): loopback first. The lab's
+        # WinRM rule allows MGMT's own addresses, but loopback needs no rule at all.
+        if ($Instance.name -eq $env:COMPUTERNAME) { $addresses = @('localhost') + $addresses }
         foreach ($a in $addresses) {
             if (-not (Test-Connection -TargetName $a -TcpPort 5986 -TimeoutSeconds 3 -Quiet)) { continue }
             # The credential that worked last goes first: a scenario may have

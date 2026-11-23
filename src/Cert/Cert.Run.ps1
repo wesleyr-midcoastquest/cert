@@ -9,6 +9,9 @@
 #
 # Everything a run changes in the lab happens after the snapshot, so a revert
 # undoes all of it: the break, the assessor's extra access, the engagement account.
+# MGMT is the exception: it's never in the snapshot. When the fixer works on
+# MGMT (the default assessor), CERT changes nothing there but the engagement
+# account's sign-in, and the revert removes that itself.
 
 # ── Records ───────────────────────────────────────────────────────────────
 
@@ -31,9 +34,34 @@ function Save-CertRun {
     [CmdletBinding()]
     param([Parameter(Mandatory)] $Config, [Parameter(Mandatory)] $Run)
     $dir = Join-Path (Get-CertRunsPath -Config $Config) $Run.id
-    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null; Protect-CertRunFolder -Path $dir }
     $Run.updated_utc = (Get-Date).ToUniversalTime().ToString('o')
     $Run | ConvertTo-Json -Depth 20 | Set-Content -Path (Join-Path $dir 'run.json') -Encoding utf8NoBOM
+}
+
+function Protect-CertRunFolder {
+    # A run folder holds the engagement password and, for a blind run, which
+    # scenario it is. When the fixer works on MGMT, keep it to the account
+    # running CERT and SYSTEM. (An administrator can still take it over, but
+    # not by browsing.)
+    param([Parameter(Mandatory)] [string] $Path)
+    if (-not $IsWindows) { return }
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    & icacls.exe $Path /inheritance:r /grant:r "${me}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { Write-Warning "Couldn't restrict $Path to $me; anyone with access to the runs folder can read it." }
+}
+
+function Write-CertLock {
+    # The lock file the lab's pipeline checks (lab.yaml handover.cert_lock_path,
+    # lab 1.6+). JSON; a blind run doesn't name its scenario.
+    param([Parameter(Mandatory)] $Config, [Parameter(Mandatory)] $Run)
+    [pscustomobject]@{
+        scenario = if ($Run.blind) { '(blind run)' } else { $Run.module.id }
+        started  = $Run.created_utc
+        snapshot = $Run.snapshot.name
+        run      = $Run.id
+        by       = $Run.owner
+    } | ConvertTo-Json | Set-Content -Path (Get-CertLockPath -Config $Config) -Encoding utf8NoBOM
 }
 
 function Get-CertRun {
@@ -59,7 +87,10 @@ function Get-CertActiveRun {
     param([Parameter(Mandatory)] $Config)
     $lock = Get-CertLockPath -Config $Config
     if (-not (Test-Path $lock)) { return $null }
-    $id = (Get-Content -Path $lock -Raw).Trim()
+    $raw = (Get-Content -Path $lock -Raw).Trim()
+    # JSON since 0.2 (the lab reads it too); a bare run id before.
+    $id = try { ($raw | ConvertFrom-Json -ErrorAction Stop).run } catch { $raw }
+    if (-not $id) { $id = $raw }
     try { Get-CertRun -Config $Config -Id $id } catch { Write-Warning "Lock file $lock names run '$id', which has no record. Remove the lock file once you're sure no run is open."; $null }
 }
 
@@ -111,6 +142,11 @@ function Test-CertPreflight {
 
     $mgmt = Get-LabRoleDefinition -Inventory $Lab.Inventory -Role 'MGMT'
     if ($mgmt.handover.lock_path -and (Test-Path $mgmt.handover.lock_path)) { $err.Add("This MGMT has handed over ($($mgmt.handover.lock_path)); run CERT on the active MGMT.") }
+    if ($mgmt.handover.cert_lock_path -and $mgmt.handover.cert_lock_path -ne (Get-CertLockPath -Config $Config)) {
+        $warn.Add("The lab expects CERT's lock at $($mgmt.handover.cert_lock_path), but cert.config.yaml says $(Get-CertLockPath -Config $Config): the pipeline won't see an open run. Make them the same.")
+    }
+    $a = Get-CertAssessor -Config $Config -Lab $Lab
+    if ($a -and $a.Fallback) { $warn.Add("No active $($Config.assessor.role); the fixer works on MGMT ($($a.Name)) instead.") }
 
     $busy = @($Lab.Instances | Where-Object { $_.state -ne 'active' })
     if ($busy) { $err.Add("The lab is mid-change: $(($busy | ForEach-Object { "$($_.name) is $($_.state)" }) -join '; '). Finish or abort the rotation first.") }
@@ -128,7 +164,7 @@ function Test-CertPreflight {
                 }
             }
             if ($m.requires.assessor -and -not (Get-CertAssessor -Config $Config -Lab $Lab)) {
-                $err.Add("$($m.id) needs the assessor, and there's none: no active $($Config.assessor.role), and no assessor.address in cert.config.yaml.")
+                $err.Add("$($m.id) needs somewhere for the fixer to work, and there's none: no active MGMT in the ledger, and no assessor.address in cert.config.yaml.")
             }
         }
     }
@@ -205,6 +241,14 @@ function Resolve-CertTargets {
             '^all-dcs$'    { , $dcs }
             '^assessor$'   { $a = Get-CertAssessor -Config $Config -Lab $Lab; if (-not $a.Instance) { throw 'The assessor isn''t a lab instance, so it can''t be a target.' }; $a.Instance }
             '^role:(.+)$'  { $r = @(Get-CertActiveInstances -Lab $Lab -Role $Matches[1])[0]; if (-not $r) { throw "No active $($Matches[1])." }; $r }
+        }
+    }
+    # A module may only break what the revert restores: never MGMT, never
+    # anything outside the snapshot set.
+    $set = @((Get-CertSnapshotSetMembers -Config $Config -Lab $Lab).name)
+    foreach ($k in @($t.Keys)) {
+        foreach ($i in @($t[$k])) {
+            if ($set -notcontains $i.name) { throw "Target '$k' is $($i.name), which isn't in the snapshot set (MGMT never is), so a revert couldn't undo the break." }
         }
     }
     $t
@@ -370,7 +414,7 @@ function New-CertEngagement {
     # engagement.access: domain-admin (Tier 0, in the lab's domain admins
     # group), standard (an ordinary user in People) or none.
     [CmdletBinding()]
-    param([Parameter(Mandatory)] $Lab, [Parameter(Mandatory)] $Run, [Parameter(Mandatory)] [string] $Access)
+    param([Parameter(Mandatory)] $Config, [Parameter(Mandatory)] $Lab, [Parameter(Mandatory)] $Run, [Parameter(Mandatory)] [string] $Access)
     if ($Access -eq 'none') { return [pscustomobject]@{ access = 'none'; account = $null; upn = $null; password = $null } }
     $inv  = $Lab.Inventory
     $dn   = Get-LabDomainDN -Inventory $inv
@@ -381,15 +425,67 @@ function New-CertEngagement {
     $upn  = "$sam@$($inv.identity.entra.tenant_domain)"
     $pw   = New-CertPassword
     $dc   = @(Get-CertActiveInstances -Lab $Lab -Role 'DC')[0]
-    Invoke-CertGuest -Lab $Lab -Instance $dc -ArgumentList $sam, $upn, $pw, $ouDn, $group, $Run.id -ScriptBlock {
+    $sid = Invoke-CertGuest -Lab $Lab -Instance $dc -ArgumentList $sam, $upn, $pw, $ouDn, $group, $Run.id -ScriptBlock {
         param($Sam, $Upn, $Pw, $OuDn, $Group, $RunId)
         Import-Module ActiveDirectory
         New-ADUser -Name $Sam -SamAccountName $Sam -UserPrincipalName $Upn -Path $OuDn -Enabled $true `
             -AccountPassword (ConvertTo-SecureString $Pw -AsPlainText -Force) -PasswordNeverExpires $true `
             -Description "CERT engagement account for run $RunId (removed by the revert)"
         if ($Group) { Add-ADGroupMember -Identity $Group -Members $Sam }
-    } | Out-Null
-    [pscustomobject]@{ access = $Access; account = "$($inv.identity.active_directory.netbios)\$sam"; upn = $upn; password = $pw; group = $group }
+        (Get-ADUser -Identity $Sam).SID.Value
+    }
+    $account = "$($inv.identity.active_directory.netbios)\$sam"
+    $e = [pscustomobject]@{ access = $Access; account = $account; upn = $upn; password = $pw; group = $group; sid = [string] $sid; mgmt_rdp_granted = $false }
+    # On MGMT, Remote Desktop is for the Tier 0 group only (the lab grants it to
+    # SG-ROLE-DomainAdmins). A standard account needs it for this run; the
+    # revert takes it away again, since MGMT isn't rolled back.
+    $a = Get-CertAssessor -Config $Config -Lab $Lab
+    if ($Access -eq 'standard' -and $a -and $a.IsMgmt) {
+        Invoke-CertGuest -Lab $Lab -Instance $a.Instance -ArgumentList $account -ScriptBlock {
+            param($Account)
+            Add-LocalGroupMember -Group (Get-LocalGroup -SID 'S-1-5-32-555') -Member $Account -ErrorAction Stop
+        } | Out-Null
+        $e.mgmt_rdp_granted = $true
+    }
+    $e
+}
+
+function Clear-CertMgmtEngagement {
+    # After a revert: the engagement account no longer exists in AD, but MGMT
+    # isn't rolled back, so its traces there are CERT's to remove: any session
+    # still signed in, the Remote Desktop grant, and its profile.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] $Config, [Parameter(Mandatory)] $Lab, [Parameter(Mandatory)] $Run)
+    $e = $Run.engagement
+    if (-not $e -or -not $e.account) { return 'no engagement account' }
+    $mgmt = Get-CertMgmtInstance -Lab $Lab
+    if (-not $mgmt) { return 'no active MGMT in the ledger' }
+    Invoke-CertGuest -Lab $Lab -Instance $mgmt -ArgumentList $e.account, $e.sid, [bool] $e.mgmt_rdp_granted -ScriptBlock {
+        param($Account, $Sid, $Granted)
+        $done = @()
+        $sam = ($Account -split '\\')[-1]
+        foreach ($line in @(& quser.exe 2>$null | Select-Object -Skip 1)) {
+            $f = ($line.Trim() -replace '^>', '') -split '\s+'
+            if ($f[0] -eq $sam) {
+                $id = @($f | Where-Object { $_ -match '^\d+$' })[0]
+                if ($id) { & logoff.exe $id 2>$null; $done += "signed out session $id" }
+            }
+        }
+        if ($Granted) {
+            $g = Get-LocalGroup -SID 'S-1-5-32-555'
+            $m = @(Get-LocalGroupMember -Group $g -ErrorAction SilentlyContinue | Where-Object { $_.SID.Value -eq $Sid -or $_.Name -eq $Account })
+            foreach ($x in $m) { Remove-LocalGroupMember -Group $g -Member $x.SID -ErrorAction SilentlyContinue; $done += 'Remote Desktop grant removed' }
+        }
+        if ($Sid) {
+            Start-Sleep -Seconds 3
+            $p = Get-CimInstance -ClassName Win32_UserProfile -Filter "SID='$Sid'" -ErrorAction SilentlyContinue
+            if ($p) {
+                try { $p | Remove-CimInstance -ErrorAction Stop; $done += "profile $($p.LocalPath) removed" }
+                catch { $done += "profile $($p.LocalPath) still in use; remove it later (System Properties > User Profiles)" }
+            }
+        }
+        if (-not $done) { 'nothing left on MGMT' } else { $done -join '; ' }
+    }
 }
 
 # ── The run ───────────────────────────────────────────────────────────────
@@ -424,7 +520,7 @@ function Start-CertRun {
         lab         = [pscustomobject]@{ site = $Lab.Site; release = $Lab.Release; version = $Lab.Version; ledger_hash = $Lab.LedgerHash }
         set         = @($pf.Vms | ForEach-Object { [pscustomobject]@{ name = $_.Instance.name; role = $_.Instance.role; vmid = $_.Vm.VmId; node = $_.Vm.Node } })
         targets     = [pscustomobject] @{}
-        assessor    = if ($assessor) { [pscustomobject]@{ name = $assessor.Name; address = $assessor.Address } } else { $null }
+        assessor    = if ($assessor) { [pscustomobject]@{ name = $assessor.Name; address = $assessor.Address; is_mgmt = $assessor.IsMgmt } } else { $null }
         snapshot    = [pscustomobject]@{ name = $name; ram = [bool] $Config.snapshot.include_ram }
         baseline    = $pf.Baseline
         engagement  = $null
@@ -435,8 +531,8 @@ function Start-CertRun {
     }
     foreach ($k in $targets.Keys) { $run.targets | Add-Member -NotePropertyName $k -NotePropertyValue @(@($targets[$k]) | ForEach-Object name) }
 
-    Set-Content -Path (Get-CertLockPath -Config $Config) -Value $run.id -Encoding utf8NoBOM
     Save-CertRun -Config $Config -Run $run
+    Write-CertLock -Config $Config -Run $run
     Add-CertRunEvent -Config $Config -Run $run -Event 'prepared' -Detail "$($m.id) $($m.version) against $($run.set.name -join ', ')"
 
     Write-Host "Snapshot set $name..."
@@ -450,7 +546,7 @@ function Start-CertRun {
     Add-CertRunEvent -Config $Config -Run $run -Event 'snapshotted' -Detail "$name on $($pf.Vms.Count) VM(s)$(if ($run.snapshot.ram) { ', with RAM' })"
 
     Add-CertRunEvent -Config $Config -Run $run -Event 'assessor access' -Detail (Enable-CertAssessorAccess -Config $Config -Lab $Lab -Run $run -Members $pf.Members)
-    $run.engagement = New-CertEngagement -Lab $Lab -Run $run -Access ([string] $m.engagement.access)
+    $run.engagement = New-CertEngagement -Config $Config -Lab $Lab -Run $run -Access ([string] $m.engagement.access)
     Add-CertRunEvent -Config $Config -Run $run -Event 'engagement' -Detail $(if ($run.engagement.account) { "$($run.engagement.account) ($($run.engagement.access))" } else { 'no account handed over' })
 
     Write-Host 'Breaking...'
@@ -607,6 +703,10 @@ function Restore-CertRun {
     foreach ($v in $pdcFirst) {
         try { $null = Sync-CertGuestTime -Lab $Lab -Instance $v.Instance }
         catch { Write-Warning "Couldn't set the clock on $($v.Instance.name): $($_.Exception.Message)" }
+    }
+    if ($Run.engagement -and $Run.engagement.account) {
+        $c = try { Clear-CertMgmtEngagement -Config $Config -Lab $Lab -Run $Run } catch { "couldn't clean up: $($_.Exception.Message)" }
+        Add-CertRunEvent -Config $Config -Run $Run -Event 'MGMT cleaned up' -Detail $c
     }
     $Run.state = 'Reverted'
     Add-CertRunEvent -Config $Config -Run $Run -Event 'reverted' -Detail "clocks set from MGMT"

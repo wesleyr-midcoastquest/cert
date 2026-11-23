@@ -5,4 +5,4 @@ may have removed "something that looked like a duplicate".
 
 We back up all GPOs every night to C:\GPO-Backups on the PDC emulator.
 
-You have a domain administrator account. Work from the assessor machine.
+You have a domain administrator account.

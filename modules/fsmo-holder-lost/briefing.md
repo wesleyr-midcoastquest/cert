@@ -6,5 +6,5 @@ and one admin says a password change didn't take. We need the remaining
 domain controller to do everything the old one did, and the directory to be
 clean, so the replacement can be added without surprises.
 
-You have a domain administrator account. Work from the assessor machine.
+You have a domain administrator account.
 Tell us when you believe it's fixed.

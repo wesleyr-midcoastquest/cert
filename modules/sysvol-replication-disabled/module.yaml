@@ -1,5 +1,5 @@
 id: sysvol-replication-disabled
-version: 1.0.0
+version: 1.0.1
 name: SYSVOL stops replicating
 summary: One DC's SYSVOL replication is switched off in AD; Group Policy changes stop reaching it
 category: Replication

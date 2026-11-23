@@ -5,4 +5,4 @@ on those machines.
 
 Both domain controllers look healthy at a glance, and user logons work.
 
-You have a domain administrator account. Work from the assessor machine.
+You have a domain administrator account.

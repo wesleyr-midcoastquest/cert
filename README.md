@@ -15,8 +15,10 @@ It's built for running a lab the way you'd handle a customer environment:
 - The **impacted owner** runs CERT on the lab's management machine (MGMT),
   breaks the lab, and hands over the way a customer would: a description of
   the symptoms, and an account.
-- The **fixer** comes in blind. They work from the **assessor**, a Windows
-  machine in the lab, and never need MGMT.
+- The **fixer** comes in blind. They sign in to MGMT by Remote Desktop with
+  the account the owner hands over, and work from there. A separate
+  workstation isn't needed. A lab Windows machine, such as the Phase 2 W11,
+  can be used instead (`assessor.role` in `cert.config.yaml`).
 
 > **A lab, not production.** CERT runs as a domain administrator, breaks things on
 > purpose, and rolls VMs back. Point it only at a MidCoast Lab. MIT licensed
@@ -25,30 +27,34 @@ It's built for running a lab the way you'd handle a customer environment:
 ## How a run works
 
 ```text
-pre-flight -> snapshot -> open access for the assessor -> engagement account -> break
+pre-flight -> snapshot -> open access for the fixer -> engagement account -> break
    -> check the break took -> hand over (clock starts) -> fixer works -> check the repair
    -> revert to the snapshot
 ```
 
 1. **Pre-flight.** CERT checks that:
    - no other run is open, and no rotation or MGMT handover is under way
-   - the module's needs are met (CERT and lab versions, how many DCs, an assessor)
+   - the module's needs are met (CERT and lab versions, how many DCs)
    - every VM in the set is running and reachable
    - **the lab passes its own validation**, because a scenario has to start
      from a working lab
    - there's room on the VM storage
-2. **Snapshot.** Every lab VM except MGMT (DCs, the assessor, and later ADES)
+2. **Snapshot.** Every lab VM except MGMT (the DCs, and later ADES and W11)
    is snapshotted under one name, `CERT-<YYMMDD>-<HHMM>-<NN>`, RAM included.
    CERT pauses all of them first and resumes them afterwards, so the set
    captures one consistent moment of the lab: no DC can replicate a change
    that another DC's snapshot missed. MGMT stays out, because it holds the
    run, the vault and the ledger.
-3. **Access for the assessor.** The lab normally allows WinRM from MGMT only.
-   CERT opens WinRM (HTTPS and HTTP), Remote Desktop and ping from the
-   assessor, on every VM in the set.
+3. **Access for the fixer.** Most tools use WinRM over HTTP (5985), but the
+   lab only allows WinRM over HTTPS (5986). On every VM in the set, CERT
+   opens WinRM over HTTP, Remote Desktop and ping from the machine the fixer
+   works on.
 4. **Engagement account.** If the module asks for one, CERT creates the
    account the owner hands to the fixer: a domain admin, an ordinary user, or
    none at all.
+   - A domain admin account can use Remote Desktop to MGMT already: the lab
+     grants it to its Tier 0 group.
+   - An ordinary user gets MGMT's Remote Desktop Users group for the run.
 5. **Break.** The module's `break.ps1` runs. CERT then checks that the break
    took, by looking for the lab validation failures and the module's own
    check failures that the module said would appear.
@@ -66,6 +72,9 @@ pre-flight -> snapshot -> open access for the assessor -> engagement account -> 
      snapshot's time.
    - The break, the extra access and the engagement account are all gone,
      since they happened after the snapshot.
+   - MGMT isn't rolled back, so CERT cleans up there itself: it signs out the
+     engagement account's sessions, removes any Remote Desktop grant, and
+     deletes the account's profile.
    - Keep the snapshot set to run again from the same point, or delete it.
 
 Each run has a record and a report (`report.md`) in `C:\MidCoastLab\cert-runs\<run id>\`:
@@ -78,19 +87,19 @@ hides which one, even from the person running CERT, until the end.
 
 ## Requirements
 
-- **A MidCoast Lab** at compatibility 1.5 or later (`lab.yaml` `version`), with
+- **A MidCoast Lab** at compatibility 1.6 or later (`lab.yaml` `version`), with
   Phase 1 built: two DCs and a pipeline-built MGMT.
-- **The assessor**: the Phase 2 Windows 11 machine (`W11`, `.40`) once the lab
-  builds it. Until then, use any domain-joined Windows machine on the lab
-  subnet, named in `cert.config.yaml` (`assessor.address`). Modules that need
-  an assessor refuse to run without one.
-- **Proxmox rights.** CERT uses the lab's own provisioning token. The lab's
-  Proxmox role doesn't include snapshot rights yet
-  ([midcoast-labs#23](https://github.com/wesleyr-midcoastquest/midcoast-labs/issues/23)).
-  Until a lab release adds them, the **Proxmox host owner** adds them once, as
-  root on a node:
+  - 1.6 gives the lab's Proxmox role the snapshot rights CERT uses.
+    `proxmox-setup.sh` must have been re-run after the update.
+  - 1.6 also makes the pipeline refuse to change the lab while a CERT run is
+    open (`CERT.lock`).
+- **Nowhere extra for the fixer.** By default the fixer works on MGMT. Who
+  can reach MGMT by Remote Desktop, and from where, is the lab's setting
+  (`network.remote_desktop_from` in `site.yaml`).
+- **A lab on 1.5** works too, if the host owner adds the snapshot rights once,
+  as root on a node:
   ```bash
-  pveum role modify MidCoastProvisioner --privs "$(pveum role list --output-format json | python3 -c 'import json,sys;print([r for r in json.load(sys.stdin) if r["roleid"]=="MidCoastProvisioner"][0]["privs"])'),VM.Snapshot,VM.Snapshot.Rollback"
+  pveum role modify MidCoastProvisioner --append 1 --privs VM.Snapshot,VM.Snapshot.Rollback,Datastore.Audit
   ```
 - **Storage for snapshots.** On the lab's LVM-thin (or ZFS) storage, a set
   costs the changes made since the snapshot, plus each VM's RAM when RAM is
@@ -112,13 +121,23 @@ Get-ChildItem -Recurse | Unblock-File
 ./Start-Cert.ps1
 ```
 
-- The defaults expect the lab repo at `C:\MidCoastLab\repo`, the assessor to
-  be the active `W11`, and runs in `C:\MidCoastLab\cert-runs`. To change any
+- The defaults expect the lab repo at `C:\MidCoastLab\repo`, the fixer to
+  work on MGMT, and runs in `C:\MidCoastLab\cert-runs`. To change any
   of these, copy `cert.config.example.yaml` to `cert.config.yaml` and keep only
   the lines you change.
 - Before the first real scenario, run **Snapshot test** from the menu. It
   snapshots the lab and rolls it back with nothing broken, which proves the
   Proxmox rights, the storage and the timings.
+
+**The fixer on MGMT.** MGMT is the lab's Tier 0 machine and is never rolled
+back. Anything the fixer changes there stays after the revert: tools they
+install, files they leave, settings they change.
+- The handover tells them MGMT's own settings, `C:\MidCoastLab` and the
+  pipeline are out of scope.
+- The pipeline won't run while a scenario is open.
+- Each run's folder is readable only by the account running CERT, because
+  it holds the engagement password and, in a blind run, the scenario's name.
+- Look over MGMT after a run with a fixer you don't know.
 
 **MGMT rotation:** `cert-runs\` isn't part of the lab's handover. Copy it to
 the new MGMT if you want the history, and clone CERT there again. Finish or
@@ -126,7 +145,7 @@ revert any open run before you rotate MGMT.
 
 ## The control panel
 
-`./Start-Cert.ps1` shows the lab, the assessor and any open run, then one of
+`./Start-Cert.ps1` shows the lab, where the fixer works and any open run, then one of
 two menus.
 
 **No run open:**
@@ -161,13 +180,14 @@ A host owner can see and remove CERT sets without MGMT, as root on any node:
 ./tools/cert-snapshots.sh prune --older-than 14 --dry-run
 ```
 
-Only snapshots named `CERT-*` on VMs tagged `midcoast-lab` are touched
-(`--tag` for another tag). Removing the set of a run that's still open means
+Only snapshots named `CERT-*` on VMs tagged `midcoast-lab` or
+`midcoast-lab-<site>` are touched (every lab on the cluster). Use `--tag <tag>`
+for one lab only. Removing the set of a run that's still open means
 that run can't be reverted: check with the lab owner first.
 
 ## Scenario modules
 
-| Module | What breaks | Fixer gets | Difficulty |
+| Module | What breaks | Fixer gets (signs in to MGMT with it) | Difficulty |
 |---|---|---|---|
 | `fsmo-holder-lost` | The PDC emulator, which holds every FSMO role, is powered off and unplugged for good | domain admin | 3 |
 | `dc-locator-records-deleted` | Every DC locator SRV record in `_msdcs` and the domain zone is deleted | domain admin | 2 |

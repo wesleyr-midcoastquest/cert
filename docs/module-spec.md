@@ -32,7 +32,7 @@ requires:
   cert: ">=0.1"                 # oldest CERT it works with (only >= is supported)
   lab: ">=1.5"                  # oldest lab compatibility number (lab.yaml version)
   roles: { DC: 1 }              # minimum active instances per lab role
-  assessor: true                # needs the assessor (most modules do)
+  assessor: true                # needs somewhere for the fixer to work (MGMT by default, so always met)
 
 targets:                        # names the scripts use, and how each is chosen
   - name: dc
@@ -59,8 +59,11 @@ solution: solution.md
 | `non-pdc-dc` | another active DC |
 | `any-dc` | a random active DC |
 | `all-dcs` | every active DC, as an array |
-| `assessor` | the assessor, if it's a lab instance |
+| `assessor` | the fixer's machine, if it's in the snapshot set (a W11; never MGMT) |
 | `role:<ROLE>` | the first active instance of a lab role, e.g. `role:ADES` |
+
+A target must be in the snapshot set: CERT refuses a module whose target
+resolves to MGMT, or to anything else a revert can't restore.
 
 **expected_failures** are lab validation IDs from the lab's
 `platform/validation/catalog.psd1`, such as `FSMO-001` or `DNS-002`. CERT runs
@@ -78,7 +81,7 @@ Both get one parameter, `$Context`:
 | `Lab` | the lab: `.Inventory` (resolved lab.yaml + site.yaml), `.Instances` (ledger), `.Site`, `.Release` |
 | `Targets` | your target names → ledger instances (`.name`, `.vmid`, `.ipv4`, `.role`); `all-dcs` is an array |
 | `Run` | the run record: `.id`, `.engagement.account`, ... |
-| `Assessor` | `.Name`, `.Address`, `.Instance` (or `$null`) |
+| `Assessor` | where the fixer works: `.Name`, `.Address`, `.Instance`, `.IsMgmt` |
 | `Config` | CERT's settings |
 | `ModulePath` | your module's folder |
 
@@ -137,8 +140,8 @@ Check the **outcome**, not the method: "every FSMO role is on a live DC", not
 
 **briefing.md** is what a customer would say: symptoms, what they think
 changed, what they need, what's out of scope. It never says what CERT did.
-Plain text, a short paragraph or three. The panel adds where to work from and
-the account.
+Plain text, a short paragraph or three. The panel adds where to work from
+(usually MGMT, with its out-of-scope note) and the account.
 
 **solution.md** is for the owner and the report. Use bold lead-ins, not a
 top-level heading (it's embedded in the report). Cover:

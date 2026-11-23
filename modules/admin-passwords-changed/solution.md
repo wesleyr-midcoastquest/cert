@@ -19,9 +19,9 @@
 **Reference response**
 1. Contain first: disable `svc-sqlbackup` and remove it from Domain Admins.
    Delete it only after its details are noted.
-2. Treat the source as compromised. The machine the changes came from is
-   MGMT; in a real incident you would isolate it. Here it's out of scope:
-   the briefing says so, because CERT runs from it.
+2. Treat the source as compromised. The changes came from MGMT's address. In
+   a real incident you would isolate that machine. Here it's out of scope, as
+   the briefing says: CERT runs from it, and the fixer works on it.
 3. Reset each affected admin account to a new password, and make sure it's
    enabled and not locked. Give the passwords to their owners out of band.
 4. For a real incident, also: reset `krbtgt` twice, with replication in

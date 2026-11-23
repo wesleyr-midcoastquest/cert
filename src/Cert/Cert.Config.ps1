@@ -105,21 +105,48 @@ function Get-CertActiveInstances {
         Sort-Object role, build_date, sequence)
 }
 
+function Get-CertMgmtInstance {
+    # The active MGMT: the ledger instance that is this machine, else the first
+    # active MGMT. $null if the ledger has none.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] $Lab)
+    $all = @(Get-CertActiveInstances -Lab $Lab -Role 'MGMT')
+    $me = @($all | Where-Object { $_.name -eq $env:COMPUTERNAME })[0]
+    if ($me) { $me } else { $all[0] }
+}
+
 function Get-CertAssessor {
-    # The machine the fixer works from: the active instance of assessor.role, or
-    # a fixed assessor.address for a machine the lab doesn't build. $null if neither.
+    # The machine the fixer works from. By default MGMT itself (assessor.role:
+    # MGMT); another lab role (W11) or a fixed assessor.address can be set in
+    # cert.config.yaml. Falls back to MGMT when the configured one isn't there.
+    # IsMgmt: the assessor is MGMT, which isn't in the snapshot, so CERT must
+    # change nothing on it that a revert wouldn't undo, and cleans up after the
+    # fixer itself.
     [CmdletBinding()]
     param([Parameter(Mandatory)] $Config, [Parameter(Mandatory)] $Lab)
     $a = $Config.assessor
+    $inst = $null; $addr = $null
     if ($a.address) {
-        $inst = @($Lab.Instances | Where-Object { $_.ipv4 -eq $a.address })[0]
-        return [pscustomobject]@{ Address = [string] $a.address; Instance = $inst; Name = if ($inst) { $inst.name } else { [string] $a.address } }
-    }
-    if ($a.role) {
+        $addr = [string] $a.address
+        $inst = @($Lab.Instances | Where-Object { $_.ipv4 -eq $addr })[0]
+    } elseif ($a.role -and $a.role -ne 'MGMT') {
         $inst = @(Get-CertActiveInstances -Lab $Lab -Role $a.role)[0]
-        if ($inst) { return [pscustomobject]@{ Address = [string] $inst.ipv4; Instance = $inst; Name = $inst.name } }
+        if ($inst) { $addr = [string] $inst.ipv4 }
     }
-    $null
+    $fallback = $false
+    if (-not $addr) {
+        $inst = Get-CertMgmtInstance -Lab $Lab
+        if (-not $inst) { return $null }
+        $addr = [string] $inst.ipv4
+        $fallback = ($a.role -and $a.role -ne 'MGMT') -or [bool] $a.address
+    }
+    [pscustomobject]@{
+        Address  = $addr
+        Instance = $inst
+        Name     = if ($inst) { $inst.name } else { $addr }
+        IsMgmt   = [bool] ($inst -and $inst.role -eq 'MGMT')
+        Fallback = $fallback
+    }
 }
 
 # ── Secrets (the lab's KeePass vault) ─────────────────────────────────────

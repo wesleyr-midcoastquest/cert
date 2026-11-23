@@ -95,12 +95,26 @@ Assert 'ledger hash ignores line endings' { $L.LedgerHash -eq (Get-CertTextHash 
 Assert 'compatibility of the lab this CERT targets' { (Test-CertLabCompatibility -Lab $L).Ok }
 Assert 'another major is refused' { -not (Test-CertLabCompatibility -Lab ([pscustomobject]@{ Version = '2.0'; Release = 'x' })).Ok }
 Assert 'another minor warns' { $c = Test-CertLabCompatibility -Lab ([pscustomobject]@{ Version = '1.7'; Release = 'x' }); $c.Ok -and $c.Message -like '*Expected to work*' }
-Assert 'assessor is the active W11' { (Get-CertAssessor -Config $config -Lab $L).Address -eq '10.50.10.40' }
+$as = Get-CertAssessor -Config $config -Lab $L
+Assert 'by default the fixer works on MGMT' { $as.IsMgmt -and $as.Address -eq '10.50.10.31' -and -not $as.Fallback }
+$cfgW11 = Merge-CertObject -Base $config -Overlay ([pscustomobject]@{ assessor = [pscustomobject]@{ role = 'W11' } })
+Assert 'assessor.role W11 picks the active W11' { $x = Get-CertAssessor -Config $cfgW11 -Lab $L; $x.Address -eq '10.50.10.40' -and -not $x.IsMgmt }
+$Lnow11 = Get-CertLab -Config $config; $Lnow11.Instances = @($Lnow11.Instances | Where-Object role -ne 'W11')
+Assert 'no W11: falls back to MGMT, and says so' { $x = Get-CertAssessor -Config $cfgW11 -Lab $Lnow11; $x.IsMgmt -and $x.Fallback }
+$cfgAddr = Merge-CertObject -Base $config -Overlay ([pscustomobject]@{ assessor = [pscustomobject]@{ address = '10.50.10.77' } })
+Assert 'a fixed address is used as given' { $x = Get-CertAssessor -Config $cfgAddr -Lab $L; $x.Address -eq '10.50.10.77' -and -not $x.IsMgmt }
 $members = & $cert { param($c, $l) Get-CertSnapshotSetMembers -Config $c -Lab $l } $config $L
+Assert 'the 1.6 per-site tag comes from the inventory' { (Get-CertLabTag -Lab $L) -eq 'midcoast-lab-example-lab' }
 Assert 'snapshot set: every active VM except MGMT' { (@($members.name) -join ',') -eq 'DC-261101-00,DC-261101-01,W11-261103-00' }
 $cfgNoMgmt = Merge-CertObject -Base $config -Overlay ([pscustomobject]@{ snapshot = [pscustomobject]@{ exclude_roles = @('W11') } })
 $members2 = & $cert { param($c, $l) Get-CertSnapshotSetMembers -Config $c -Lab $l } $cfgNoMgmt $L
 Assert 'MGMT stays out even when exclude_roles forgets it' { @($members2.name) -notcontains 'MGMT-261102-00' -and @($members2.name) -notcontains 'W11-261103-00' }
+
+Write-Host 'Targets'
+$mgmtTarget = [pscustomobject]@{ targets = @([pscustomobject]@{ name = 'victim'; select = 'role:MGMT' }) }
+Assert-Throws 'a module can never target MGMT' { Resolve-CertTargets -Config $config -Lab $L -Manifest $mgmtTarget } "*isn't in the snapshot set*"
+$dcTarget = [pscustomobject]@{ targets = @([pscustomobject]@{ name = 'all'; select = 'all-dcs' }) }
+Assert 'all-dcs resolves to both DCs' { @((Resolve-CertTargets -Config $config -Lab $L -Manifest $dcTarget)['all']).Count -eq 2 }
 
 Write-Host 'Versions and requirements'
 Assert '1.5 = 1.5.0' { (Compare-CertVersion '1.5' '1.5.0') -eq 0 }
@@ -160,14 +174,14 @@ try {
     Install-CertUpdate -Update $u | Out-Null
     Assert 'installing clones it' { Test-Path (Join-Path $sourceRoot 'modules/gpo-deleted/module.yaml') }
     Assert 'its modules join the catalog' { @(Get-CertModules -Config $cfgSrc | Where-Object Key -eq 'extra/gpo-deleted').Count -eq 1 }
-    (Get-Content (Join-Path $work 'modules/gpo-deleted/module.yaml') -Raw).Replace('version: 1.0.0', 'version: 1.1.0') | Set-Content (Join-Path $work 'modules/gpo-deleted/module.yaml')
+    (Get-Content (Join-Path $work 'modules/gpo-deleted/module.yaml') -Raw).Replace('version: 1.0.1', 'version: 1.1.0') | Set-Content (Join-Path $work 'modules/gpo-deleted/module.yaml')
     Copy-Item (Join-Path $certRoot 'modules/dc-time-skew') (Join-Path $work 'modules/') -Recurse
     & git -C $work add -A; & git -C $work commit --quiet -m two; & git -C $work push --quiet origin main 2>$null
     $u = @(Get-CertUpdates -Config $cfgSrc -Source extra)[0]
     Assert 'behind, with the commit listed' { $u.State -eq 'behind' -and @($u.Commits).Count -eq 1 }
-    Assert 'updated module shows old and new version' { @($u.Changes | Where-Object { $_.Id -eq 'gpo-deleted' -and $_.From -eq '1.0.0' -and $_.To -eq '1.1.0' }).Count -eq 1 }
+    Assert 'updated module shows old and new version' { @($u.Changes | Where-Object { $_.Id -eq 'gpo-deleted' -and $_.From -eq '1.0.1' -and $_.To -eq '1.1.0' }).Count -eq 1 }
     Assert 'new module shows as new' { @($u.Changes | Where-Object { $_.Id -eq 'dc-time-skew' -and $_.Change -eq 'new' }).Count -eq 1 }
-    Assert 'fetching changed nothing yet' { (Read-CertYaml (Join-Path $sourceRoot 'modules/gpo-deleted/module.yaml')).version -eq '1.0.0' }
+    Assert 'fetching changed nothing yet' { (Read-CertYaml (Join-Path $sourceRoot 'modules/gpo-deleted/module.yaml')).version -eq '1.0.1' }
     Add-Content (Join-Path $sourceRoot 'modules/gpo-deleted/solution.md') 'local edit'
     Assert-Throws 'local edits stop an update' { Install-CertUpdate -Update $u } '*local changes*'
     & git -C $sourceRoot checkout --quiet -- .
@@ -176,6 +190,7 @@ try {
 } finally { Remove-Item $sourceRoot -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item (Join-Path $certRoot 'sources') -Force -ErrorAction SilentlyContinue }
 
 Write-Host 'Snapshot and revert sequences (fake Proxmox)'
+& $cert { param($t, $p) $script:FakeTag = $t; $script:FakePool = $p } $L.Inventory.proxmox.tag $L.Inventory.proxmox.pool
 & $cert {
     $script:PveCalls = [Collections.Generic.List[string]]::new()
     $script:PveSnaps = @{}
@@ -186,7 +201,7 @@ Write-Host 'Snapshot and revert sequences (fake Proxmox)'
         param($Lab, $Method, $Path, $Body)
         $script:PveCalls.Add("$Method $Path")
         switch -Regex ("$Method $Path") {
-            '^GET /cluster/resources' { return @(100, 101, 121, 140 | ForEach-Object { [pscustomobject]@{ vmid = $_; node = 'pve01'; status = 'running'; name = @{ 100 = 'DC-261101-00'; 101 = 'DC-261101-01'; 121 = 'MGMT-261102-00'; 140 = 'W11-261103-00' }[$_]; tags = 'midcoast-lab'; pool = 'MidCoast-Lab'; maxmem = 4GB } }) }
+            '^GET /cluster/resources' { return @(100, 101, 121, 140 | ForEach-Object { [pscustomobject]@{ vmid = $_; node = 'pve01'; status = 'running'; name = @{ 100 = 'DC-261101-00'; 101 = 'DC-261101-01'; 121 = 'MGMT-261102-00'; 140 = 'W11-261103-00' }[$_]; tags = $script:FakeTag; pool = $script:FakePool; maxmem = 4GB } }) }
             '^GET /nodes/\w+/qemu/(\d+)/snapshot$' { return @($script:PveSnaps[[int] $Matches[1]] | Where-Object { $_ } | ForEach-Object { [pscustomobject]@{ name = $_; vmstate = 1; snaptime = 1762400000; description = 'ledger=0123456789ab' } }) }
             '^POST /nodes/\w+/qemu/(\d+)/snapshot$' { $script:PveSnaps[[int] $Matches[1]] = @($script:PveSnaps[[int] $Matches[1]]) + $Body.snapname; return 'UPID:pve01:x' }
             '^POST /nodes/\w+/qemu/(\d+)/snapshot/[^/]+/rollback' { $script:PveState[[int] $Matches[1]] = 'running'; return 'UPID:pve01:x' }
@@ -221,8 +236,15 @@ Assert 'every VM rolled back' { @($calls | Where-Object { $_ -match '/rollback' 
 Assert-Throws 'a VM without the snapshot stops the revert before anything changes' { Restore-CertSnapshotSet -Lab $L -Vms $vms -Name 'CERT-000000-0000-00' } '*has no snapshot*'
 Assert-Throws 'only CERT snapshots can be removed' { Remove-CertPveSnapshot -Lab $L -Vm $vms[0].Vm -Name 'before-upgrade' } '*Not a CERT snapshot*'
 
+$openRun = [pscustomobject]@{ id = $snapName; state = 'Broken'; blind = $true; owner = 'tester'; created_utc = '2026-11-23T14:00:00Z'; module = [pscustomobject]@{ id = 'gpo-deleted' }; snapshot = [pscustomobject]@{ name = $snapName }; timeline = @(); updated_utc = $null }
+Save-CertRun -Config $config -Run $openRun
+& $cert { param($c, $r) Write-CertLock -Config $c -Run $r } $config $openRun
+$lockJson = Get-Content $config.lock_path -Raw | ConvertFrom-Json
+Assert 'the lock is JSON the lab can read' { $lockJson.run -eq $snapName -and $lockJson.snapshot -eq $snapName -and $lockJson.started }
+Assert 'a blind run''s lock hides the scenario' { $lockJson.scenario -eq '(blind run)' }
+Assert 'the open run is found from the JSON lock' { (Get-CertActiveRun -Config $config).id -eq $snapName }
 Set-Content -Path $config.lock_path -Value $snapName
-Save-CertRun -Config $config -Run ([pscustomobject]@{ id = $snapName; state = 'Broken'; snapshot = [pscustomobject]@{ name = $snapName }; timeline = @(); updated_utc = $null })
+Assert 'and from a 0.1 plain lock' { (Get-CertActiveRun -Config $config).id -eq $snapName }
 Assert-Throws "an open run's set can't be removed" { Remove-CertSnapshotSet -Config $config -Lab $L -Name $snapName -Confirm:$false } '*belongs to the open run*'
 $pf = Test-CertPreflight -Config $config -Lab $L -SkipBaseline
 Assert 'pre-flight refuses while a run is open' { -not $pf.Ok -and @($pf.Errors -like '*still open*').Count -eq 1 }

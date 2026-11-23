@@ -8,11 +8,11 @@
 # Requires: powershell-yaml, Microsoft.PowerShell.SecretManagement and the lab's
 # KeePass vault (both already on every MGMT), git on PATH.
 
-$script:CertVersion = '0.1.0'
+$script:CertVersion = '0.2.0'
 $script:CertRoot    = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 # The lab release CERT was written against: the lab's compatibility number
 # (lab.yaml version). Another minor is allowed with a warning; another major is refused.
-$script:LabCompatibility = '1.5'
+$script:LabCompatibility = '1.6'
 
 Import-Module powershell-yaml -ErrorAction Stop
 

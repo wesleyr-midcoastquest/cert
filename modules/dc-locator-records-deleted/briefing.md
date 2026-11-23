@@ -5,4 +5,4 @@ won't connect to the directory. The domain controllers themselves seem to be up.
 Someone on the team was "tidying up DNS" yesterday afternoon. We don't know
 exactly what they did.
 
-You have a domain administrator account. Work from the assessor machine.
+You have a domain administrator account.

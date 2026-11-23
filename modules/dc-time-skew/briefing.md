@@ -6,4 +6,4 @@ controller don't seem to show up on the other.
 Nothing was changed on purpose, as far as we know. There was maintenance on
 the virtualization hosts last weekend.
 
-You have a domain administrator account. Work from the assessor machine.
+You have a domain administrator account.

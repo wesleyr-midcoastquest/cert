@@ -40,7 +40,7 @@ function Write-CertReport {
     $L.Add('## Lab')
     $L.Add('')
     $L.Add("Snapshot set ``$($Run.snapshot.name)``$(if ($Run.snapshot.ram) { ' (with RAM)' }): $(@($Run.set | ForEach-Object { "$($_.name) ($($_.role), $($_.vmid))" }) -join ', ').")
-    if ($Run.assessor) { $L.Add("Assessor: $($Run.assessor.name) ($($Run.assessor.address)).") }
+    if ($Run.assessor) { $L.Add("The fixer worked on $($Run.assessor.name) ($($Run.assessor.address))$(if ($Run.assessor.is_mgmt) { ', the lab''s MGMT' }).") }
     if ($Run.engagement -and $Run.engagement.account) { $L.Add("Engagement account: ``$($Run.engagement.account)`` ($($Run.engagement.access)).") }
     $L.Add('')
     $L.Add('Targets: ' + (@($Run.targets.PSObject.Properties | ForEach-Object { "$($_.Name) = $(@($_.Value) -join ', ')" }) -join '; ') + '.')

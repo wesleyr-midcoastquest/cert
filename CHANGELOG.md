@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.2.0 (Nov 2026): the fixer works on MGMT
+
+Written for MidCoast Lab compatibility 1.6 (LAB-261121-00 and later), which
+has the snapshot rights and the CERT lock. A 1.5 lab works with the rights
+added by hand (README).
+
+- **No separate assessor needed.** The fixer signs in to MGMT with the
+  engagement account and works from there (`assessor.role: MGMT`, the new
+  default). A W11 or a fixed address still works; with no active W11, CERT
+  falls back to MGMT and says so.
+- **MGMT is never rolled back, so CERT cleans up there itself.** On revert it
+  signs out the engagement account's sessions, removes any Remote Desktop
+  grant it gave (a `standard` account gets MGMT's Remote Desktop Users for
+  the run), and deletes the account's profile.
+- The handover tells the fixer that MGMT's own settings, `C:\MidCoastLab` and
+  the pipeline are out of scope.
+- Run folders are readable only by the account running CERT (and SYSTEM):
+  they hold the engagement password and, in a blind run, the scenario.
+- **Lock file is JSON** (`scenario`, `started`, `snapshot`, `run`, `by`), as
+  the lab's pipeline reads it. A blind run's lock doesn't name its scenario.
+  Pre-flight warns when `lock_path` differs from lab.yaml's
+  `handover.cert_lock_path`. A 0.1 plain-text lock is still read.
+- A module target must be in the snapshot set: CERT refuses one that
+  resolves to MGMT.
+- Per-site Proxmox tags (lab 1.6) are used from the inventory.
+  `cert-snapshots.sh` now matches `midcoast-lab` and every `midcoast-lab-<site>`
+  by default.
+- All six modules 1.0.1: briefings no longer say "work from the assessor".
+  In `admin-passwords-changed`, MGMT's configuration (not MGMT) is out of scope.
+- CI runs on `master`.
+
 ## 0.1.0 (Nov 2026): first release
 
 Written for MidCoast Lab compatibility 1.5 (LAB-261105-04). Needs snapshot
