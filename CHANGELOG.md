@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.4 (Nov 2026): SYSVOL after a revert
+
+- **Every revert now ends with an authoritative SYSVOL sync from the PDC
+  emulator** (`Repair-CertSysvol`, Microsoft KB 2218556). Rolling a DC back
+  to a snapshot gives it a new VM-Generation ID. DFS Replication takes that
+  as a restore and waits to copy SYSVOL from a partner. When every DC was
+  rolled back, every DC waits for another, and SYSVOL stays stuck in initial
+  sync (state 2, event 4614; lab check SYSVOL-002). All copies are the same
+  snapshot, so declaring the PDC's copy the master loses nothing. It's
+  skipped when SYSVOL is already Normal everywhere.
+- The snapshot test does the same, and reports it.
+- Menu 8 runs it on demand.
+
 ## 0.2.3 (Nov 2026)
 
 - Pre-flight reads the VM storage's use again: storage over 2 GB overflowed

@@ -262,6 +262,33 @@ Assert 'pre-flight refuses while a run is open' { -not $pf.Ok -and @($pf.Errors 
 Remove-Item $config.lock_path
 Assert 'with no run open, the set can be removed' { (Remove-CertSnapshotSet -Config $config -Lab $L -Name $snapName -Confirm:$false) -like 'Removed*' }
 
+Write-Host 'SYSVOL after a revert (fake guests)'
+& $cert {
+    $script:GuestLog = [Collections.Generic.List[string]]::new()
+    $script:Sysvol = @{ 'DC-261101-00' = 2; 'DC-261101-01' = 2 }
+    function script:Get-CertPdcInstance { param($Lab) @($Lab.Instances | Where-Object name -eq 'DC-261101-00')[0] }
+    function script:Invoke-CertGuest {
+        param($Lab, $Instance, [scriptblock] $ScriptBlock, [object[]] $ArgumentList = @(), [int] $TimeoutSeconds)
+        $t = $ScriptBlock.ToString()
+        $n = $Instance.name
+        if ($t -match 'Stop-Service DFSR') { $script:GuestLog.Add("stop:$n"); return }
+        if ($t -match 'Start-Service DFSR') { $script:GuestLog.Add("start:$n"); return }
+        if ($t -match 'msDFSR-Enabled') { $script:GuestLog.Add("sub:$($ArgumentList[0]):$($ArgumentList[1]):$($ArgumentList[2])"); return }
+        if ($t -match 'repadmin') { $script:GuestLog.Add("sync"); return }
+        if ($t -match 'pollad') { $script:Sysvol[$n] = 4; $script:GuestLog.Add("wait:$n"); return 4 }
+        return $script:Sysvol[$n]
+    }
+}
+$r = Repair-CertSysvol -Lab $L 6>$null
+$log = @(& $cert { $script:GuestLog })
+Assert 'stuck SYSVOL: re-synced from the PDC' { $r -like 'SYSVOL re-synced from DC-261101-00*' }
+Assert 'stops DFSR everywhere first' { ($log[0..1] -join ',') -eq 'stop:DC-261101-00,stop:DC-261101-01' }
+Assert 'PDC marked authoritative, the other disabled, then replicated' { ($log[2..4] -join ',') -eq 'sub:DC-261101-00:False:True,sub:DC-261101-01:False:False,sync' }
+Assert 'PDC back to Normal before the other starts' { [array]::IndexOf([string[]] $log, 'wait:DC-261101-00') -lt [array]::IndexOf([string[]] $log, 'start:DC-261101-01') }
+Assert 'the other enabled and waited for' { $log -contains 'sub:DC-261101-01:True:False' -and $log[-1] -eq 'wait:DC-261101-01' }
+& $cert { $script:GuestLog.Clear() }
+Assert 'healthy SYSVOL: nothing touched' { (Repair-CertSysvol -Lab $L) -like '*already normal*' -and @(& $cert { $script:GuestLog }).Count -eq 0 }
+
 Write-Host 'Pre-flight'
 $pf = Test-CertPreflight -Config $config -Lab $L -SkipBaseline
 Assert 'a healthy fake lab passes' { $pf.Ok }

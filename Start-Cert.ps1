@@ -158,6 +158,7 @@ function Invoke-MainMenu($Config, $Lab, $Modules) {
     Write-Host '  5. Snapshot test (snapshot and revert, nothing broken)'
     Write-Host '  6. Snapshot sets'
     Write-Host '  7. Past runs'
+    Write-Host '  8. Re-sync SYSVOL (authoritative, from the PDC emulator)'
     Write-Host '  R. Reload    Q. Quit'
     switch (Read-Choice 'Choice') {
         '1' { if (Invoke-UpdateMenu $Config) { return 'reimport' } }
@@ -193,6 +194,7 @@ function Invoke-MainMenu($Config, $Lab, $Modules) {
             $n = Read-Choice 'Number for its report (Enter: back)'
             if ($n -match '^\d+$' -and [int] $n -ge 1 -and [int] $n -le $runs.Count) { Get-Content (Write-CertReport -Config $Config -Run $runs[[int] $n - 1]) | Write-Host }
         }
+        '8' { if (Confirm-Cert 'Stop DFS Replication on every DC and re-sync SYSVOL from the PDC emulator?') { Write-Host (Repair-CertSysvol -Lab $Lab) } }
         'r' { return 'reload' }
         'q' { return 'quit' }
     }

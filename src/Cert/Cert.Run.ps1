@@ -333,6 +333,86 @@ function Restore-CertSnapshotSet {
     foreach ($v in $Vms) { Write-Host "    plug in $($v.Instance.name)"; Set-CertPveVmLink -Lab $Lab -Vm $v.Vm -Up $true }
 }
 
+function Repair-CertSysvol {
+    # An authoritative SYSVOL sync from the PDC emulator, after a revert.
+    #
+    # Why: rolling a DC back to a snapshot gives it a new VM-Generation ID.
+    # Windows takes that as "this DC was restored": AD protects itself (new
+    # invocation ID), and DFS Replication starts a non-authoritative initial
+    # sync of SYSVOL, waiting for a partner to copy from. When every DC was
+    # rolled back, every DC waits for another: SYSVOL stays in state 2 (event
+    # 4614) for good. The way out is Microsoft's authoritative SYSVOL restore
+    # (KB 2218556): the PDC emulator's copy is declared the master, the others
+    # copy from it. After a CERT revert all copies are the same snapshot, so
+    # nothing is lost.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] $Lab, [int] $TimeoutSeconds = 900)
+    $dcs = @(Get-CertActiveInstances -Lab $Lab -Role 'DC')
+    if (-not $dcs) { return 'no DCs' }
+    $auth = Get-CertPdcInstance -Lab $Lab
+    $others = @($dcs | Where-Object name -ne $auth.name)
+
+    $state = {
+        $rf = Get-CimInstance -Namespace root\microsoftdfs -ClassName DfsrReplicatedFolderInfo -Filter "ReplicatedFolderName='SYSVOL Share'" -ErrorAction SilentlyContinue
+        if ($rf) { [int] $rf.State } else { -1 }
+    }
+    # Already healthy everywhere: nothing to do.
+    $states = @{}
+    foreach ($d in $dcs) { $states[$d.name] = Invoke-CertGuest -Lab $Lab -Instance $d -ScriptBlock $state -TimeoutSeconds 300 }
+    if (@($states.Values | Where-Object { $_ -ne 4 }).Count -eq 0) { return 'SYSVOL already normal on every DC' }
+    Write-Host "    SYSVOL states: $(($states.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', '); authoritative sync from $($auth.name)"
+
+    # Sets a DC's SYSVOL subscription in AD, on the authoritative DC.
+    $setSub = {
+        param($Computer, $Enabled, $Authoritative)
+        Import-Module ActiveDirectory
+        $dn = "CN=SYSVOL Subscription,CN=Domain System Volume,CN=DFSR-LocalSettings,$((Get-ADComputer $Computer -Server localhost).DistinguishedName)"
+        $r = @{ 'msDFSR-Enabled' = [bool] $Enabled }
+        if ($Authoritative) { $r['msDFSR-Options'] = 1 }
+        Set-ADObject -Identity $dn -Replace $r -Server localhost
+    }
+    $sync = { & repadmin.exe /syncall /AdeP 2>&1 | Out-Null }
+    $wait = {
+        param($Want, $Seconds)
+        $deadline = (Get-Date).AddSeconds($Seconds)
+        do {
+            & dfsrdiag.exe pollad 2>&1 | Out-Null
+            Start-Sleep -Seconds 15
+            $rf = Get-CimInstance -Namespace root\microsoftdfs -ClassName DfsrReplicatedFolderInfo -Filter "ReplicatedFolderName='SYSVOL Share'" -ErrorAction SilentlyContinue
+            $s = if ($rf) { [int] $rf.State } else { -1 }
+        } while ($s -ne $Want -and (Get-Date) -lt $deadline)
+        $s
+    }
+
+    # 1. Stop DFS Replication everywhere; mark the PDC authoritative and
+    #    every subscription disabled; replicate that to all DCs.
+    foreach ($d in $dcs) { Invoke-CertGuest -Lab $Lab -Instance $d -ScriptBlock { Stop-Service DFSR -Force } | Out-Null }
+    Invoke-CertGuest -Lab $Lab -Instance $auth -ScriptBlock $setSub -ArgumentList $auth.name, $false, $true | Out-Null
+    foreach ($d in $others) { Invoke-CertGuest -Lab $Lab -Instance $auth -ScriptBlock $setSub -ArgumentList $d.name, $false, $false | Out-Null }
+    Invoke-CertGuest -Lab $Lab -Instance $auth -ScriptBlock $sync | Out-Null
+
+    # 2. The PDC first: start, enable, wait for Normal (event 4602).
+    Invoke-CertGuest -Lab $Lab -Instance $auth -ScriptBlock { Start-Service DFSR } | Out-Null
+    Start-Sleep -Seconds 20
+    Invoke-CertGuest -Lab $Lab -Instance $auth -ScriptBlock $setSub -ArgumentList $auth.name, $true, $false | Out-Null
+    Invoke-CertGuest -Lab $Lab -Instance $auth -ScriptBlock $sync | Out-Null
+    $s = Invoke-CertGuest -Lab $Lab -Instance $auth -ScriptBlock $wait -ArgumentList 4, $TimeoutSeconds
+    if ($s -ne 4) { throw "SYSVOL on $($auth.name) didn't reach Normal (state $s) after the authoritative sync. Check its DFS Replication log (event 4602 expected)." }
+
+    # 3. The others: start, enable, copy from the PDC (events 4614, 4604).
+    foreach ($d in $others) { Invoke-CertGuest -Lab $Lab -Instance $d -ScriptBlock { Start-Service DFSR } | Out-Null }
+    Start-Sleep -Seconds 20
+    foreach ($d in $others) { Invoke-CertGuest -Lab $Lab -Instance $auth -ScriptBlock $setSub -ArgumentList $d.name, $true, $false | Out-Null }
+    Invoke-CertGuest -Lab $Lab -Instance $auth -ScriptBlock $sync | Out-Null
+    $bad = @()
+    foreach ($d in $others) {
+        $s = Invoke-CertGuest -Lab $Lab -Instance $d -ScriptBlock $wait -ArgumentList 4, $TimeoutSeconds
+        if ($s -ne 4) { $bad += "$($d.name) (state $s)" }
+    }
+    if ($bad) { throw "SYSVOL didn't reach Normal on $($bad -join ', ') after the authoritative sync from $($auth.name). Check their DFS Replication logs (event 4604 expected)." }
+    "SYSVOL re-synced from $($auth.name) to $(if ($others) { ($others.name -join ', ') } else { 'no other DC' })"
+}
+
 function Remove-CertSnapshotSet {
     # Deletes a CERT snapshot set from every lab VM that has it. Refuses the
     # set of an open run.
@@ -720,6 +800,10 @@ function Restore-CertRun {
         try { $null = Sync-CertGuestTime -Lab $Lab -Instance $v.Instance }
         catch { Write-Warning "Couldn't set the clock on $($v.Instance.name): $($_.Exception.Message)" }
     }
+    if (@($vms | Where-Object { $_.Instance.role -eq 'DC' }).Count) {
+        $r = try { Repair-CertSysvol -Lab $Lab } catch { Write-Warning $_.Exception.Message; "failed: $($_.Exception.Message)" }
+        Add-CertRunEvent -Config $Config -Run $Run -Event 'SYSVOL' -Detail $r
+    }
     if ($Run.engagement -and $Run.engagement.account) {
         $c = try { Clear-CertMgmtEngagement -Config $Config -Lab $Lab -Run $Run } catch { "couldn't clean up: $($_.Exception.Message)" }
         Add-CertRunEvent -Config $Config -Run $Run -Event 'MGMT cleaned up' -Detail $c
@@ -747,9 +831,10 @@ function Test-CertSnapshotRoundTrip {
     $t1 = Get-Date
     Restore-CertSnapshotSet -Lab $Lab -Vms $pf.Vms -Name $name
     foreach ($v in $pf.Vms) { try { $null = Sync-CertGuestTime -Lab $Lab -Instance $v.Instance } catch { Write-Warning "Clock on $($v.Instance.name): $($_.Exception.Message)" } }
+    $sysvol = if (@($pf.Vms | Where-Object { $_.Instance.role -eq 'DC' }).Count) { try { Repair-CertSysvol -Lab $Lab } catch { Write-Warning $_.Exception.Message; 'SYSVOL sync failed' } } else { 'no DCs' }
     $t2 = Get-Date
     foreach ($v in $pf.Vms) { Remove-CertPveSnapshot -Lab $Lab -Vm $v.Vm -Name $name }
-    "Snapshot of $($pf.Vms.Count) VM(s) took $(Format-CertDuration ($t1 - $t0)); revert and clocks $(Format-CertDuration ($t2 - $t1)). Test set removed."
+    "Snapshot of $($pf.Vms.Count) VM(s) took $(Format-CertDuration ($t1 - $t0)); revert, clocks and SYSVOL $(Format-CertDuration ($t2 - $t1)) ($sysvol). Test set removed."
 }
 
 function Format-CertDuration {
