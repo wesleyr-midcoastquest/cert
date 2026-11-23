@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.9 (Nov 2026): replication synced after a revert
+
+- **Every revert (and the snapshot test) ends with each DC pulling every
+  partition from each inbound partner** (`Sync-CertDcReplication`), and the
+  timeline's new `replication` event says how it went. The DCs come back at
+  slightly different moments, and a DC that tried to replicate from one still
+  stopped kept a failure count (lab check REPL-001, error 1256). That blocked
+  the next run's pre-flight until the next scheduled replication, up to an
+  hour later.
+- The SYSVOL repair uses the same pull. It pushed with `repadmin /syncall
+  /AdeP`, which stops at the first partition it can't sync ("The naming
+  context specified for this replication operation is invalid") and whose
+  output CERT threw away.
+
 ## 0.2.8 (Nov 2026): the engagement account in MGMT's Notes
 
 - **The engagement account and its password also go in MGMT's Proxmox
