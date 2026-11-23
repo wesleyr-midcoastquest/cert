@@ -30,6 +30,10 @@
 5. Write down the timeline: first reset, account creation, group change,
    source address.
 
+**Not reset:** `svc-labdeploy`, the engagement account, and the admin account
+running CERT (from 1.0.3; resetting it locked the person running the scenario
+out of MGMT).
+
 **Keep `svc-labdeploy` working.** CERT checks the repair with it, and the briefing
 puts it out of scope. If a fixer disables it anyway, the repair check can't
 reach the DCs: revert, and note it in the report.

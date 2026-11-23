@@ -12,7 +12,9 @@ param([Parameter(Mandatory)] $Context)
 $inv = $Context.Lab.Inventory
 $suffix = [string] $inv.identity.administrative_model.account_suffix
 $admins = @($inv.identity.administrative_model.administrators | Where-Object { [int] $_.tier -eq 0 } | ForEach-Object { "$($_.username)$suffix" })
-$skip = @('svc-labdeploy', ($Context.Run.engagement.account -split '\\')[-1]) | Where-Object { $_ }
+# Never reset: CERT's fallback account, the engagement account, and the account
+# running CERT (resetting it locked the person running the scenario out).
+$skip = @('svc-labdeploy', ($Context.Run.engagement.account -split '\\')[-1], ([string] $Context.Run.owner -split '\\')[-1]) | Where-Object { $_ }
 
 $r = Invoke-CertTarget -Context $Context -Instance $Context.Targets.dc -ArgumentList $admins, $skip -ScriptBlock {
     param($Admins, $Skip)

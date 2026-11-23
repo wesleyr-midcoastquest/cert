@@ -1,7 +1,7 @@
 # Cert.Pve: the Proxmox API, with the lab's own provisioning token.
 #
 # CERT only ever snapshots, rolls back, powers and (link up/down) re-cables lab
-# VMs. It has no function that deletes a VM or a disk, and modules must not add
+# VMs, and adds or removes its own block in a lab VM's Notes. It has no function that deletes a VM or a disk, and modules must not add
 # one: a deleted VM can't be rolled back.
 
 $script:SnapshotPrefix = 'CERT'
@@ -125,6 +125,40 @@ function Get-CertPveVmStatus {
     $s = Invoke-CertPve -Lab $Lab -Method GET -Path "/nodes/$($Vm.Node)/qemu/$($Vm.VmId)/status/current"
     # status: running | stopped; qmpstatus: running | paused | ...
     [pscustomobject]@{ Status = [string] $s.status; Qmp = [string] $s.qmpstatus }
+}
+
+function Remove-CertNoteBlock {
+    # The Notes text without run $RunId's block (see Add-CertPveVmNote).
+    param([string] $Text, [Parameter(Mandatory)] [string] $RunId)
+    $id = [regex]::Escape($RunId)
+    ([regex]::Replace([string] $Text, "(?ms)(\r?\n)*^--- CERT run ${id}: begin [^\n]*$.*?^--- CERT run ${id}: end ---[ \t]*$", '')).TrimEnd()
+}
+
+function Add-CertPveVmNote {
+    # Appends lines to a lab VM's Notes (its Proxmox description), between two
+    # lines naming the run, so Remove-CertPveVmNote can take exactly them out
+    # again. Whatever else is in the Notes stays as it is.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] $Lab, [Parameter(Mandatory)] $Vm, [Parameter(Mandatory)] [string] $RunId, [Parameter(Mandatory)] [AllowEmptyString()] [string[]] $Lines)
+    $cfg = Invoke-CertPve -Lab $Lab -Method GET -Path "/nodes/$($Vm.Node)/qemu/$($Vm.VmId)/config"
+    $kept = Remove-CertNoteBlock -Text ([string] $cfg.description) -RunId $RunId
+    $block = @("--- CERT run ${RunId}: begin (the revert removes this) ---") + $Lines + @("--- CERT run ${RunId}: end ---")
+    $new = ((@($kept, '') | Where-Object { $kept }) + $block) -join "`n"
+    if ($new.Length -gt 8000) { throw "VM $($Vm.VmId)'s Notes would be over Proxmox's 8 KB limit." }
+    Invoke-CertPve -Lab $Lab -Method PUT -Path "/nodes/$($Vm.Node)/qemu/$($Vm.VmId)/config" -Body @{ description = $new } | Out-Null
+}
+
+function Remove-CertPveVmNote {
+    # Takes run $RunId's block out of a lab VM's Notes. $true if there was one.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] $Lab, [Parameter(Mandatory)] $Vm, [Parameter(Mandatory)] [string] $RunId)
+    $cfg = Invoke-CertPve -Lab $Lab -Method GET -Path "/nodes/$($Vm.Node)/qemu/$($Vm.VmId)/config"
+    $old = [string] $cfg.description
+    $new = Remove-CertNoteBlock -Text $old -RunId $RunId
+    if ($new -eq $old.TrimEnd()) { return $false }
+    $body = if ($new) { @{ description = $new } } else { @{ delete = 'description' } }
+    Invoke-CertPve -Lab $Lab -Method PUT -Path "/nodes/$($Vm.Node)/qemu/$($Vm.VmId)/config" -Body $body | Out-Null
+    $true
 }
 
 function Set-CertPveVmLink {

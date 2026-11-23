@@ -70,6 +70,9 @@ function Show-Handover($Config, $Lab, $Run, $Module) {
         Write-Host "  Account:   $($Run.engagement.account)  (UPN $($Run.engagement.upn))"
         Write-Host "  Password:  $($Run.engagement.password)"
         Write-Host "  Access:    $($Run.engagement.access)"
+        if (@($Run.timeline | Where-Object { $_.event -eq 'account in notes' -and $_.detail -notlike 'not written*' }).Count) {
+            Write-Host "  (Also in MGMT's Proxmox Notes until the revert, in case you lose this session.)"
+        }
     } else { Write-Host '  Account:   none (the scenario hands over no account)' }
     Write-Host '────────────────────────────────────────────────────────────' -ForegroundColor Cyan
 }
