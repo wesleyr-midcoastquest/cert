@@ -212,6 +212,7 @@ Write-Host 'Snapshot and revert sequences (fake Proxmox)'
             '^DELETE /nodes/\w+/qemu/(\d+)/snapshot/(.+)$' { $script:PveSnaps[[int] $Matches[1]] = @($script:PveSnaps[[int] $Matches[1]] | Where-Object { $_ -ne $Matches[2] }); return 'UPID:pve01:x' }
             '^POST /nodes/\w+/qemu/(\d+)/status/(\w+)' { $script:PveState[[int] $Matches[1]] = @{ suspend = 'paused'; resume = 'running'; stop = 'stopped'; start = 'running' }[$Matches[2]]; return 'UPID:pve01:x' }
             '^GET /nodes/\w+/qemu/(\d+)/status/current' { $s = $script:PveState[[int] $Matches[1]]; return [pscustomobject]@{ status = if ($s -eq 'stopped') { 'stopped' } else { 'running' }; qmpstatus = $s } }
+            '^GET /nodes/\w+/storage/[^/]+/status$' { return [pscustomobject]@{ used = [long] 918055550976; total = [long] 1836111101952 } }
             default { throw "fake Proxmox: unexpected $Method $Path" }
         }
     }
@@ -226,6 +227,7 @@ Assert 'all unplugged before the first snapshot' { ($ops[0..2] -join ',') -eq 'l
 Assert 'then each snapshotted, running (never paused)' { ($ops[3..5] -join ',') -eq 'snap:100,snap:101,snap:140' -and -not @($ops | Where-Object { $_ -like 'suspend*' }) }
 Assert 'then all plugged back in' { ($ops[6..8] -join ',') -eq 'link:100,link:101,link:140' -and @(& $cert { $script:PveLink.Values } | Where-Object { $_ -ne 'up' }).Count -eq 0 }
 Assert 'every snapshot recorded the VM unplugged' { @(& $cert { $script:SnapLink.Values } | Where-Object { $_ -ne 'down' }).Count -eq 0 }
+Assert 'storage use of a 1.8 TB pool (past Int32)' { (Get-CertStorageUse -Lab $L -Nodes 'pve01').UsedPercent -eq 50 }
 Assert 'MGMT never touched' { -not @($calls | Where-Object { $_ -match '/qemu/121/' -and $_ -notmatch '^GET' }) }
 $sets = @(Get-CertSnapshotSets -Lab $L -Members $members)
 Assert 'the set is listed once, on three VMs' { $sets.Count -eq 1 -and $sets[0].Count -eq 3 -and $sets[0].Name -eq $snapName }

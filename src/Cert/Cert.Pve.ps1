@@ -229,7 +229,7 @@ function Get-CertStorageUse {
     foreach ($n in $Nodes | Select-Object -Unique) {
         try {
             $s = Invoke-CertPve -Lab $Lab -Method GET -Path "/nodes/$n/storage/$storage/status"
-            [pscustomobject]@{ Node = $n; Storage = $storage; UsedPercent = [math]::Round(100.0 * $s.used / [math]::Max(1, $s.total), 1); FreeGB = [math]::Round(($s.total - $s.used) / 1GB, 1) }
+            [pscustomobject]@{ Node = $n; Storage = $storage; UsedPercent = [math]::Round(100.0 * $s.used / [math]::Max([double] 1, [double] $s.total), 1); FreeGB = [math]::Round(($s.total - $s.used) / 1GB, 1) }
         } catch { [pscustomobject]@{ Node = $n; Storage = $storage; UsedPercent = $null; FreeGB = $null; Error = $_.Exception.Message } }
     }
 }

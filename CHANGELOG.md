@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.3 (Nov 2026)
+
+- Pre-flight reads the VM storage's use again: storage over 2 GB overflowed
+  an integer, so the check always said it couldn't read it.
+
 ## 0.2.2 (Nov 2026): consistent RAM snapshots without pausing
 
 - The snapshot set is taken with every VM **unplugged** (network link down)
