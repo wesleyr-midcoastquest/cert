@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.7 (Nov 2026): admin-passwords-changed can run
+
+- **admin-passwords-changed 1.0.2.** Its break passed two lists as
+  `-ArgumentList (, $admins), (, $skip)`, so each arrived on the DC as an
+  array inside an array. The built-in Administrator was reset, then
+  `Set-ADAccountPassword` refused the first Tier 0 account ("Cannot convert
+  'name-a' to ... ADAccount") and the break stopped half-way. Its
+  `verify.ps1` did the same with the changed accounts and the Domain Admins
+  list, so the repair check couldn't pass.
+- The module check flags `-ArgumentList` with several values where one is
+  wrapped as `(, $x)`. docs/module-spec.md said to wrap array arguments that
+  way; it now says only a lone array needs it.
+
 ## 0.2.6 (Nov 2026): modules can reach the lab again
 
 - **Every module's `break.ps1` and `verify.ps1` now run in a scope of their

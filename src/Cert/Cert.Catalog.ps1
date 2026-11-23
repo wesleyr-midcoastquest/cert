@@ -103,8 +103,9 @@ function Test-CertManifest {
         $p = Join-Path $Folder $f
         if (Test-Path $p) {
             $tokens = $null; $errs = $null
-            [void] [Management.Automation.Language.Parser]::ParseFile($p, [ref] $tokens, [ref] $errs)
+            $ast = [Management.Automation.Language.Parser]::ParseFile($p, [ref] $tokens, [ref] $errs)
             foreach ($x in @($errs)) { $e.Add("${f}: line $($x.Extent.StartLineNumber): $($x.Message)") }
+            foreach ($x in Find-CertNestedArgument -Ast $ast) { $e.Add("${f}: line ${x}: -ArgumentList wraps one of several values as (, `$x), so it arrives as an array inside an array; give it as it is") }
         }
     }
     $e.ToArray()   # callers wrap in @(): no output means valid
@@ -118,6 +119,29 @@ function Get-CertLabCatalogIds {
     $p = Join-Path $LabRoot 'platform/validation/catalog.psd1'
     if (-not (Test-Path $p)) { return @() }
     try { @((Import-PowerShellDataFile -Path $p).Keys) } catch { @() }
+}
+
+function Find-CertNestedArgument {
+    # Line numbers where -ArgumentList gives several values and wraps one of
+    # them as (, $x). Each value already arrives as it is, so the wrapped one
+    # arrives as an array inside an array (admin-passwords-changed 1.0.1).
+    # Only a lone array argument needs (, $x).
+    param([Parameter(Mandatory)] $Ast)
+    $calls = $Ast.FindAll({ param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.GetCommandName() -in 'Invoke-CertTarget', 'Invoke-CertGuest', 'Invoke-Command' }, $true)
+    foreach ($c in $calls) {
+        $els = $c.CommandElements
+        for ($k = 0; $k -lt $els.Count - 1; $k++) {
+            if (-not ($els[$k] -is [Management.Automation.Language.CommandParameterAst] -and $els[$k].ParameterName -eq 'ArgumentList')) { continue }
+            $v = $els[$k + 1]
+            if (-not ($v -is [Management.Automation.Language.ArrayLiteralAst] -and $v.Elements.Count -gt 1)) { continue }
+            foreach ($el in $v.Elements) {
+                $inner = if ($el -is [Management.Automation.Language.ParenExpressionAst]) { @($el.Pipeline.PipelineElements)[0] } else { $null }
+                # (, $x) parses as a one-element array literal.
+                if ($inner -is [Management.Automation.Language.CommandExpressionAst] -and $inner.Expression -is [Management.Automation.Language.ArrayLiteralAst] -and
+                    $inner.Expression.Elements.Count -eq 1) { $el.Extent.StartLineNumber }
+            }
+        }
+    }
 }
 
 function Get-CertModules {

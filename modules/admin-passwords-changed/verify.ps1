@@ -10,7 +10,7 @@ $state = Get-CertModuleState -Context $Context
 if (-not $state) { New-CertCheck -Name 'module-state' -Passed $false -Detail 'No record of what the break changed.'; return }
 $eng = ($Context.Run.engagement.account -split '\\')[-1]
 
-$r = Invoke-CertTarget -Context $Context -Instance $Context.Targets.dc -ArgumentList (, @($state.changed)), $state.rogue, $state.at, (, @($state.domain_admins_before)), $eng -ScriptBlock {
+$r = Invoke-CertTarget -Context $Context -Instance $Context.Targets.dc -ArgumentList @($state.changed), $state.rogue, $state.at, @($state.domain_admins_before), $eng -ScriptBlock {
     param($Changed, $Rogue, $At, $Before, $Eng)
     Import-Module ActiveDirectory
     $since = [datetime]::Parse($At).ToUniversalTime().AddSeconds(5)

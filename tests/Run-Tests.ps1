@@ -156,6 +156,14 @@ Copy-Item (Join-Path $certRoot 'modules/gpo-deleted/*') $broken
 (Get-Content (Join-Path $broken 'module.yaml') -Raw).Replace('id: gpo-deleted', 'id: parse-error') | Set-Content (Join-Path $broken 'module.yaml')
 Set-Content (Join-Path $broken 'break.ps1') 'param($Context) if ( {'
 Assert 'a script that does not parse is a problem' { @(Test-CertManifest -Manifest (Read-CertYaml (Join-Path $broken 'module.yaml')) -Folder $broken) -like 'break.ps1: line*' }
+Set-Content (Join-Path $broken 'break.ps1') @'
+param($Context)
+Invoke-CertTarget -Context $Context -Instance $x -ArgumentList (, $names), (, $more) -ScriptBlock { param($A, $B) }
+Invoke-CertTarget -Context $Context -Instance $x -ArgumentList (, $names) -ScriptBlock { param($A) }
+Invoke-CertTarget -Context $Context -Instance $x -ArgumentList $names, $more -ScriptBlock { param($A, $B) }
+'@
+$nested = @(Test-CertManifest -Manifest (Read-CertYaml (Join-Path $broken 'module.yaml')) -Folder $broken | Where-Object { $_ -like '*array inside an array*' })
+Assert 'one of several arguments wrapped as (, $x) is a problem; a lone one is not' { $nested.Count -eq 2 -and @($nested -like 'break.ps1: line 2:*').Count -eq 2 }
 
 Write-Host 'Updates from a source'
 $origin = Join-Path $tmp 'origin.git'; $work = Join-Path $tmp 'work'
