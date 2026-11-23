@@ -112,6 +112,7 @@ function Invoke-SnapshotMenu($Config, $Lab) {
 function Invoke-RunMenu($Config, $Lab, $Run, $Modules) {
     $module = @($Modules | Where-Object { $_.Key -eq $Run.module.key })[0]
     if (-not $module) { Write-Warning "Module $($Run.module.key) is no longer in the catalog; only Revert and Report are available." }
+    if ($Run.state -eq 'BreakFailed') { Write-Warning "The break failed (8 writes the report with the reason). Revert the run (9), then start it again." }
     Write-Host '  1. Show the handover (briefing, account)'
     Write-Host '  2. Start the clock (handed over to the fixer)'
     Write-Host '  3. Check the break took'
@@ -123,7 +124,7 @@ function Invoke-RunMenu($Config, $Lab, $Run, $Modules) {
     Write-Host '  9. Revert the lab and end the run'
     Write-Host '  R. Reload    Q. Quit (the run stays open)'
     switch (Read-Choice 'Choice') {
-        '1' { if ($module) { Show-Handover $Config $Lab $Run $module } }
+        '1' { if ($Run.state -eq 'BreakFailed') { Write-Warning 'Nothing to hand over: the break failed.' } elseif ($module) { Show-Handover $Config $Lab $Run $module } }
         '2' { Start-CertClock -Config $Config -Run $Run -Fixer (Read-Host 'Fixer (name, optional)') }
         '3' { if ($module) { if (Test-CertBreak -Config $Config -Lab $Lab -Run $Run -Module $module) { Write-Host 'The break took.' } } }
         '4' { Add-CertRunNote -Config $Config -Run $Run -CauseIdentified -Text (Read-Host 'What the fixer identified') }

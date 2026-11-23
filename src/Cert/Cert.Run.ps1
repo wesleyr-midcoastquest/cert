@@ -645,15 +645,31 @@ function Start-CertRun {
         throw "Run $($run.id) is open, but setting up after the snapshot failed: $($_.Exception.Message) Nothing has been broken. Revert the run (menu 9) to clean up."
     }
 
+    # Setup changes every machine's firewall, and a machine can stop answering
+    # WinRM for a while afterwards (a DC running Tailscale did, for at least a
+    # minute; why isn't known). Wait until every target answers before breaking.
+    Write-Host 'Waiting for the targets to answer...'
+    $targetInstances = @($targets.Values | ForEach-Object { @($_) } | Where-Object { $_ } | Sort-Object name -Unique)
+    try {
+        $ready = Wait-CertGuests -Lab $Lab -Instances $targetInstances -TimeoutSeconds 300
+        Add-CertRunEvent -Config $Config -Run $run -Event 'targets ready' -Detail $(if ($Blind) { 'every target answers' } else { $ready })
+    } catch {
+        $run.state = 'BreakFailed'
+        Add-CertRunEvent -Config $Config -Run $run -Event 'break failed' -Detail "Nothing was broken: $($_.Exception.Message)"
+        Write-Warning 'Nothing was broken. Revert the run (menu 9), then start it again.'
+        return $run
+    }
+
     Write-Host 'Breaking...'
-    $ctx = [pscustomobject]@{ Lab = $Lab; Config = $Config; Run = $run; Targets = $targets; Assessor = $assessor; ModulePath = $Module.Path }
+    $ctx = [pscustomobject]@{ Lab = $Lab; Config = $Config; Run = $run; Targets = $targets; Assessor = $assessor; ModulePath = $Module.Path; ConnectTimeoutSeconds = 300 }
     try {
         $out = & (Join-Path $Module.Path $m.break) -Context $ctx
         $run.state = 'Broken'
         Add-CertRunEvent -Config $Config -Run $run -Event 'broken' -Detail $(if ($Blind) { 'details hidden (blind run)' } else { (@($out) | ForEach-Object { "$_" }) -join '; ' })
     } catch {
+        $run.state = 'BreakFailed'
         Add-CertRunEvent -Config $Config -Run $run -Event 'break failed' -Detail $_.Exception.Message
-        Write-Warning 'The break failed part-way. The lab may be half-broken: revert the run (menu: Revert).'
+        Write-Warning 'The break failed, perhaps part-way: the lab may be half-broken. Revert the run (menu 9).'
         return $run
     }
 
@@ -700,6 +716,10 @@ function Test-CertBreak {
     # now fail at least one blocking check. Returns $true when both hold.
     [CmdletBinding()]
     param([Parameter(Mandatory)] $Config, [Parameter(Mandatory)] $Lab, [Parameter(Mandatory)] $Run, [Parameter(Mandatory)] $Module)
+    if ($Run.state -eq 'BreakFailed') {
+        Write-Warning "The break failed (see the run's timeline), so there's nothing to check. Revert the run (menu 9), then start it again."
+        return $false
+    }
     $m = $Module.Manifest
     $seen = @{}
     if (@($m.expected_failures | Where-Object { $_ }).Count) {
@@ -865,10 +885,12 @@ function Set-CertTargetLink {
 }
 
 function Invoke-CertTarget {
-    # Runs a script block (Windows PowerShell 5.1) on a target.
+    # Runs a script block (Windows PowerShell 5.1) on a target. -TimeoutSeconds:
+    # how long to keep trying to connect (default: 300 during the break, else 60).
     [CmdletBinding()]
-    param([Parameter(Mandatory)] $Context, [Parameter(Mandatory)] $Instance, [Parameter(Mandatory)] [scriptblock] $ScriptBlock, [object[]] $ArgumentList = @())
-    Invoke-CertGuest -Lab $Context.Lab -Instance $Instance -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList
+    param([Parameter(Mandatory)] $Context, [Parameter(Mandatory)] $Instance, [Parameter(Mandatory)] [scriptblock] $ScriptBlock, [object[]] $ArgumentList = @(), [int] $TimeoutSeconds = 0)
+    if (-not $TimeoutSeconds) { $TimeoutSeconds = if ($Context.PSObject.Properties['ConnectTimeoutSeconds'] -and $Context.ConnectTimeoutSeconds) { [int] $Context.ConnectTimeoutSeconds } else { 60 } }
+    Invoke-CertGuest -Lab $Context.Lab -Instance $Instance -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -TimeoutSeconds $TimeoutSeconds
 }
 
 function New-CertCheck {
