@@ -111,6 +111,14 @@ hides which one, even from the person running CERT, until the end.
 
 ## Installing on MGMT
 
+For a tested version, use the **latest release**: it's at the top of
+[Releases](https://github.com/wesleyr-midcoastquest/cert/releases/latest), and
+each release is a tag (`v<version>`, the version CERT's menu shows). `master`
+can be ahead of it. The clone below gets `master`. To install a release
+instead, add `--branch v<version>` to `git clone`. Note that **Update modules**
+then moves CERT on to the current `master`. To stay on releases, skip it, and
+take a later release with `git fetch --tags` and `git checkout v<version>`.
+
 As your admin account (`<you>-a`), in PowerShell 7:
 
 ```powershell
