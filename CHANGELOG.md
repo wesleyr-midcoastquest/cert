@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.1 (Nov 2026): fixes from the first real run
+
+- After a RAM snapshot, a VM is resumed whatever QEMU calls its paused
+  state (it may be `postmigrate`, not `paused`), and CERT checks it's
+  running again. The first real run left the DCs frozen, and the next step
+  couldn't reach them.
+- After the snapshot, CERT waits up to 5 minutes for every VM to answer
+  WinRM before it goes on. If setup fails, the message says the run is open,
+  nothing was broken, and to revert.
+
 ## 0.2.0 (Nov 2026): the fixer works on MGMT
 
 Written for MidCoast Lab compatibility 1.6 (LAB-261121-00 and later), which

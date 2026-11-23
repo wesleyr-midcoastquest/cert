@@ -301,8 +301,12 @@ function New-CertSnapshotSet {
     } finally {
         foreach ($v in $paused) {
             try {
+                # After a RAM snapshot QEMU may report 'postmigrate' or similar
+                # rather than 'paused': anything but running gets a resume.
                 $st = Get-CertPveVmStatus -Lab $Lab -Vm $v.Vm
-                if ($st.Qmp -eq 'paused') { Invoke-CertPveVmAction -Lab $Lab -Vm $v.Vm -Action resume }
+                if ($st.Status -eq 'running' -and $st.Qmp -ne 'running') { Invoke-CertPveVmAction -Lab $Lab -Vm $v.Vm -Action resume }
+                $st = Get-CertPveVmStatus -Lab $Lab -Vm $v.Vm
+                if ($st.Qmp -ne 'running') { throw "still $($st.Qmp) after resume" }
             } catch { Write-Warning "Couldn't resume $($v.Instance.name): $($_.Exception.Message). Resume it on Proxmox (qm resume $($v.Vm.VmId))." }
         }
     }
@@ -325,7 +329,7 @@ function Restore-CertSnapshotSet {
     foreach ($v in $Vms) {
         $st = Get-CertPveVmStatus -Lab $Lab -Vm $v.Vm
         if ($st.Status -eq 'stopped') { Invoke-CertPveVmAction -Lab $Lab -Vm $v.Vm -Action start }
-        elseif ($st.Qmp -eq 'paused') { Invoke-CertPveVmAction -Lab $Lab -Vm $v.Vm -Action resume }
+        elseif ($st.Qmp -ne 'running') { Invoke-CertPveVmAction -Lab $Lab -Vm $v.Vm -Action resume }
     }
 }
 
@@ -545,9 +549,21 @@ function Start-CertRun {
     $run.state = 'Snapshotted'
     Add-CertRunEvent -Config $Config -Run $run -Event 'snapshotted' -Detail "$name on $($pf.Vms.Count) VM(s)$(if ($run.snapshot.ram) { ', with RAM' })"
 
-    Add-CertRunEvent -Config $Config -Run $run -Event 'assessor access' -Detail (Enable-CertAssessorAccess -Config $Config -Lab $Lab -Run $run -Members $pf.Members)
-    $run.engagement = New-CertEngagement -Config $Config -Lab $Lab -Run $run -Access ([string] $m.engagement.access)
-    Add-CertRunEvent -Config $Config -Run $run -Event 'engagement' -Detail $(if ($run.engagement.account) { "$($run.engagement.account) ($($run.engagement.access))" } else { 'no account handed over' })
+    try {
+        # Resumed VMs need a moment before WinRM answers again.
+        foreach ($i in $pf.Members) {
+            $s = Connect-CertGuest -Lab $Lab -Instance $i -TimeoutSeconds 300
+            if (-not $s) { throw "$($i.name) ($($i.ipv4)) doesn't answer over WinRM/HTTPS since the snapshot. Check on Proxmox that it's running, not paused (qm status <vmid> --verbose)." }
+            Remove-PSSession $s
+        }
+        Add-CertRunEvent -Config $Config -Run $run -Event 'assessor access' -Detail (Enable-CertAssessorAccess -Config $Config -Lab $Lab -Run $run -Members $pf.Members)
+        $run.engagement = New-CertEngagement -Config $Config -Lab $Lab -Run $run -Access ([string] $m.engagement.access)
+        Save-CertRun -Config $Config -Run $run
+        Add-CertRunEvent -Config $Config -Run $run -Event 'engagement' -Detail $(if ($run.engagement.account) { "$($run.engagement.account) ($($run.engagement.access))" } else { 'no account handed over' })
+    } catch {
+        Add-CertRunEvent -Config $Config -Run $run -Event 'setup failed' -Detail $_.Exception.Message
+        throw "Run $($run.id) is open, but setting up after the snapshot failed: $($_.Exception.Message) Nothing has been broken. Revert the run (menu 9) to clean up."
+    }
 
     Write-Host 'Breaking...'
     $ctx = [pscustomobject]@{ Lab = $Lab; Config = $Config; Run = $run; Targets = $targets; Assessor = $assessor; ModulePath = $Module.Path }

@@ -203,7 +203,7 @@ Write-Host 'Snapshot and revert sequences (fake Proxmox)'
         switch -Regex ("$Method $Path") {
             '^GET /cluster/resources' { return @(100, 101, 121, 140 | ForEach-Object { [pscustomobject]@{ vmid = $_; node = 'pve01'; status = 'running'; name = @{ 100 = 'DC-261101-00'; 101 = 'DC-261101-01'; 121 = 'MGMT-261102-00'; 140 = 'W11-261103-00' }[$_]; tags = $script:FakeTag; pool = $script:FakePool; maxmem = 4GB } }) }
             '^GET /nodes/\w+/qemu/(\d+)/snapshot$' { return @($script:PveSnaps[[int] $Matches[1]] | Where-Object { $_ } | ForEach-Object { [pscustomobject]@{ name = $_; vmstate = 1; snaptime = 1762400000; description = 'ledger=0123456789ab' } }) }
-            '^POST /nodes/\w+/qemu/(\d+)/snapshot$' { $script:PveSnaps[[int] $Matches[1]] = @($script:PveSnaps[[int] $Matches[1]]) + $Body.snapname; return 'UPID:pve01:x' }
+            '^POST /nodes/\w+/qemu/(\d+)/snapshot$' { $script:PveSnaps[[int] $Matches[1]] = @($script:PveSnaps[[int] $Matches[1]]) + $Body.snapname; $script:PveState[[int] $Matches[1]] = 'postmigrate'; return 'UPID:pve01:x' }
             '^POST /nodes/\w+/qemu/(\d+)/snapshot/[^/]+/rollback' { $script:PveState[[int] $Matches[1]] = 'running'; return 'UPID:pve01:x' }
             '^DELETE /nodes/\w+/qemu/(\d+)/snapshot/(.+)$' { $script:PveSnaps[[int] $Matches[1]] = @($script:PveSnaps[[int] $Matches[1]] | Where-Object { $_ -ne $Matches[2] }); return 'UPID:pve01:x' }
             '^POST /nodes/\w+/qemu/(\d+)/status/(\w+)' { $script:PveState[[int] $Matches[1]] = @{ suspend = 'paused'; resume = 'running'; stop = 'stopped'; start = 'running' }[$Matches[2]]; return 'UPID:pve01:x' }
@@ -220,6 +220,7 @@ $calls = @(& $cert { $script:PveCalls })
 $ops = @($calls | Where-Object { $_ -match '^POST' } | ForEach-Object { if ($_ -match 'status/(\w+)') { "$($Matches[1]):$(($_ -split '/')[4])" } elseif ($_ -match '/snapshot$') { "snap:$(($_ -split '/')[4])" } })
 Assert 'all paused before the first snapshot' { ($ops[0..2] -join ',') -eq 'suspend:100,suspend:101,suspend:140' }
 Assert 'then each snapshotted' { ($ops[3..5] -join ',') -eq 'snap:100,snap:101,snap:140' }
+Assert 'resumed even when QEMU says postmigrate, not paused' { @(& $cert { $script:PveState.Values } | Where-Object { $_ -ne 'running' }).Count -eq 0 }
 Assert 'then all resumed' { ($ops[6..8] -join ',') -eq 'resume:100,resume:101,resume:140' }
 Assert 'MGMT never touched' { -not @($calls | Where-Object { $_ -match '/qemu/121/' -and $_ -notmatch '^GET' }) }
 $sets = @(Get-CertSnapshotSets -Lab $L -Members $members)
