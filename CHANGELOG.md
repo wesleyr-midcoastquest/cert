@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.2 (Nov 2026): consistent RAM snapshots without pausing
+
+- The snapshot set is taken with every VM **unplugged** (network link down)
+  instead of paused. QEMU can't continue a VM whose RAM was saved while it
+  was paused ("Migration is not finalized yet"). Unplugged, the DCs still
+  can't replicate between snapshots, so the set is still one moment of the
+  lab. They're plugged back in when the last snapshot is done.
+- A revert rolls every VM back (they come back unplugged, as snapshotted),
+  then plugs them all in together.
+- The storage-use warning now says why it couldn't read the storage.
+
 ## 0.2.1 (Nov 2026): fixes from the first real run
 
 - After a RAM snapshot, a VM is resumed whatever QEMU calls its paused

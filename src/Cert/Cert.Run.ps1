@@ -181,7 +181,7 @@ function Test-CertPreflight {
     }
     if ($vms) {
         foreach ($s in Get-CertStorageUse -Lab $Lab -Nodes @($vms.Vm.Node)) {
-            if ($null -eq $s.UsedPercent) { $warn.Add("Couldn't read the use of $($s.Storage) on $($s.Node).") }
+            if ($null -eq $s.UsedPercent) { $warn.Add("Couldn't read the use of $($s.Storage) on $($s.Node)$(if ($s.Error) { ": $($s.Error)" }).") }
             elseif ($s.UsedPercent -ge [double] $Config.snapshot.storage_warn_percent) {
                 $warn.Add("$($s.Storage) on $($s.Node) is $($s.UsedPercent)% used ($($s.FreeGB) GB free). Snapshots, and RAM snapshots most of all, need room; thin storage that fills up stops every VM on it.")
             }
@@ -276,9 +276,12 @@ function Get-CertSnapshotSets {
 }
 
 function New-CertSnapshotSet {
-    # Pauses every VM in the set, snapshots each (with RAM), then resumes them
-    # all. Paused together, no DC can replicate a change another DC's snapshot
-    # missed, so the set is one consistent moment of the lab.
+    # Unplugs every VM in the set from the network, snapshots each with RAM
+    # while it runs, then plugs them all back in. Unplugged, no DC can
+    # replicate a change another DC's snapshot missed, so the set is one
+    # consistent moment of the lab even though the snapshots are taken one
+    # after another. (Pausing the VMs instead doesn't work with RAM: QEMU
+    # can't continue a VM whose RAM was saved while it was paused.)
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] $Config, [Parameter(Mandatory)] $Lab,
@@ -286,9 +289,9 @@ function New-CertSnapshotSet {
     )
     $ram  = [bool] $Config.snapshot.include_ram
     $desc = "CERT snapshot set $Name. $Purpose site=$($Lab.Site) release=$($Lab.Release) ledger=$($Lab.LedgerHash.Substring(0, 12)) vms=$(@($Vms.Instance.name) -join ',') by=$env:USERNAME"
-    $paused = @()
+    $unplugged = @()
     try {
-        foreach ($v in $Vms) { Invoke-CertPveVmAction -Lab $Lab -Vm $v.Vm -Action suspend; $paused += $v }
+        foreach ($v in $Vms) { Set-CertPveVmLink -Lab $Lab -Vm $v.Vm -Up $false; $unplugged += $v }
         foreach ($v in $Vms) {
             Write-Host "    snapshot $($v.Instance.name) ($($v.Vm.VmId))$(if ($ram) { ' with RAM' })"
             New-CertPveSnapshot -Lab $Lab -Vm $v.Vm -Name $Name -Description $desc -IncludeRam $ram
@@ -299,15 +302,9 @@ function New-CertSnapshotSet {
         foreach ($v in $Vms) { try { if (Get-CertPveSnapshots -Lab $Lab -Vm $v.Vm | Where-Object name -eq $Name) { Remove-CertPveSnapshot -Lab $Lab -Vm $v.Vm -Name $Name } } catch { Write-Warning "Couldn't remove partial snapshot $Name from $($v.Instance.name): $($_.Exception.Message)" } }
         throw $failure
     } finally {
-        foreach ($v in $paused) {
-            try {
-                # After a RAM snapshot QEMU may report 'postmigrate' or similar
-                # rather than 'paused': anything but running gets a resume.
-                $st = Get-CertPveVmStatus -Lab $Lab -Vm $v.Vm
-                if ($st.Status -eq 'running' -and $st.Qmp -ne 'running') { Invoke-CertPveVmAction -Lab $Lab -Vm $v.Vm -Action resume }
-                $st = Get-CertPveVmStatus -Lab $Lab -Vm $v.Vm
-                if ($st.Qmp -ne 'running') { throw "still $($st.Qmp) after resume" }
-            } catch { Write-Warning "Couldn't resume $($v.Instance.name): $($_.Exception.Message). Resume it on Proxmox (qm resume $($v.Vm.VmId))." }
+        foreach ($v in $unplugged) {
+            try { Set-CertPveVmLink -Lab $Lab -Vm $v.Vm -Up $true }
+            catch { Write-Warning "Couldn't plug $($v.Instance.name) back in: $($_.Exception.Message). On Proxmox, remove link_down=1 from its network device (Hardware > Network Device > Disconnect)." }
         }
     }
 }
@@ -315,7 +312,9 @@ function New-CertSnapshotSet {
 function Restore-CertSnapshotSet {
     # Stops every VM in the set, then rolls each back. All stopped first, so a
     # rolled-back DC can't replicate from one still holding the broken state.
-    # RAM snapshots come back running; disk-only ones are started.
+    # The snapshots were taken unplugged, so the VMs come back unplugged; once
+    # all are back, they're plugged in together. RAM snapshots come back
+    # running; disk-only ones are started.
     [CmdletBinding()]
     param([Parameter(Mandatory)] $Lab, [Parameter(Mandatory)] [object[]] $Vms, [Parameter(Mandatory)] [string] $Name)
     foreach ($v in $Vms) {
@@ -331,6 +330,7 @@ function Restore-CertSnapshotSet {
         if ($st.Status -eq 'stopped') { Invoke-CertPveVmAction -Lab $Lab -Vm $v.Vm -Action start }
         elseif ($st.Qmp -ne 'running') { Invoke-CertPveVmAction -Lab $Lab -Vm $v.Vm -Action resume }
     }
+    foreach ($v in $Vms) { Write-Host "    plug in $($v.Instance.name)"; Set-CertPveVmLink -Lab $Lab -Vm $v.Vm -Up $true }
 }
 
 function Remove-CertSnapshotSet {

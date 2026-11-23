@@ -195,6 +195,8 @@ Write-Host 'Snapshot and revert sequences (fake Proxmox)'
     $script:PveCalls = [Collections.Generic.List[string]]::new()
     $script:PveSnaps = @{}
     $script:PveState = @{ 100 = 'running'; 101 = 'running'; 140 = 'running' }
+    $script:PveLink  = @{ 100 = 'up'; 101 = 'up'; 140 = 'up' }
+    $script:SnapLink = @{}
     function script:Get-CertPveToken { 'fake' }
     function script:Wait-CertPveTask { }
     function script:Invoke-CertPve {
@@ -203,8 +205,10 @@ Write-Host 'Snapshot and revert sequences (fake Proxmox)'
         switch -Regex ("$Method $Path") {
             '^GET /cluster/resources' { return @(100, 101, 121, 140 | ForEach-Object { [pscustomobject]@{ vmid = $_; node = 'pve01'; status = 'running'; name = @{ 100 = 'DC-261101-00'; 101 = 'DC-261101-01'; 121 = 'MGMT-261102-00'; 140 = 'W11-261103-00' }[$_]; tags = $script:FakeTag; pool = $script:FakePool; maxmem = 4GB } }) }
             '^GET /nodes/\w+/qemu/(\d+)/snapshot$' { return @($script:PveSnaps[[int] $Matches[1]] | Where-Object { $_ } | ForEach-Object { [pscustomobject]@{ name = $_; vmstate = 1; snaptime = 1762400000; description = 'ledger=0123456789ab' } }) }
-            '^POST /nodes/\w+/qemu/(\d+)/snapshot$' { $script:PveSnaps[[int] $Matches[1]] = @($script:PveSnaps[[int] $Matches[1]]) + $Body.snapname; $script:PveState[[int] $Matches[1]] = 'postmigrate'; return 'UPID:pve01:x' }
-            '^POST /nodes/\w+/qemu/(\d+)/snapshot/[^/]+/rollback' { $script:PveState[[int] $Matches[1]] = 'running'; return 'UPID:pve01:x' }
+            '^POST /nodes/\w+/qemu/(\d+)/snapshot$' { $script:PveSnaps[[int] $Matches[1]] = @($script:PveSnaps[[int] $Matches[1]]) + $Body.snapname; $script:SnapLink[[int] $Matches[1]] = $script:PveLink[[int] $Matches[1]]; return 'UPID:pve01:x' }
+            '^GET /nodes/\w+/qemu/(\d+)/config$' { $l = if ($script:PveLink[[int] $Matches[1]] -eq 'down') { ',link_down=1' } else { '' }; return [pscustomobject]@{ net0 = "virtio=BC:24:11:00:00:01,bridge=vmbr2$l" } }
+            '^PUT /nodes/\w+/qemu/(\d+)/config$' { $id = [int] $Matches[1]; $script:PveLink[$id] = if ($Body.net0 -match 'link_down=1') { 'down' } else { 'up' }; return $null }
+            '^POST /nodes/\w+/qemu/(\d+)/snapshot/[^/]+/rollback' { $script:PveState[[int] $Matches[1]] = 'running'; $script:PveLink[[int] $Matches[1]] = $script:SnapLink[[int] $Matches[1]]; return 'UPID:pve01:x' }
             '^DELETE /nodes/\w+/qemu/(\d+)/snapshot/(.+)$' { $script:PveSnaps[[int] $Matches[1]] = @($script:PveSnaps[[int] $Matches[1]] | Where-Object { $_ -ne $Matches[2] }); return 'UPID:pve01:x' }
             '^POST /nodes/\w+/qemu/(\d+)/status/(\w+)' { $script:PveState[[int] $Matches[1]] = @{ suspend = 'paused'; resume = 'running'; stop = 'stopped'; start = 'running' }[$Matches[2]]; return 'UPID:pve01:x' }
             '^GET /nodes/\w+/qemu/(\d+)/status/current' { $s = $script:PveState[[int] $Matches[1]]; return [pscustomobject]@{ status = if ($s -eq 'stopped') { 'stopped' } else { 'running' }; qmpstatus = $s } }
@@ -217,11 +221,11 @@ $snapName = New-CertSnapshotName -Lab $L -Vms @($vms.Vm)
 Assert 'snapshot names: CERT-YYMMDD-HHMM-NN' { $snapName -match '^CERT-\d{6}-\d{4}-00$' }
 New-CertSnapshotSet -Config $config -Lab $L -Vms $vms -Name $snapName -Purpose 'test' 6>$null
 $calls = @(& $cert { $script:PveCalls })
-$ops = @($calls | Where-Object { $_ -match '^POST' } | ForEach-Object { if ($_ -match 'status/(\w+)') { "$($Matches[1]):$(($_ -split '/')[4])" } elseif ($_ -match '/snapshot$') { "snap:$(($_ -split '/')[4])" } })
-Assert 'all paused before the first snapshot' { ($ops[0..2] -join ',') -eq 'suspend:100,suspend:101,suspend:140' }
-Assert 'then each snapshotted' { ($ops[3..5] -join ',') -eq 'snap:100,snap:101,snap:140' }
-Assert 'resumed even when QEMU says postmigrate, not paused' { @(& $cert { $script:PveState.Values } | Where-Object { $_ -ne 'running' }).Count -eq 0 }
-Assert 'then all resumed' { ($ops[6..8] -join ',') -eq 'resume:100,resume:101,resume:140' }
+$ops = @($calls | Where-Object { $_ -match '^(POST|PUT)' } | ForEach-Object { if ($_ -match '^PUT .*/config$') { "link:$(($_ -split '/')[4])" } elseif ($_ -match 'status/(\w+)') { "$($Matches[1]):$(($_ -split '/')[4])" } elseif ($_ -match '/snapshot$') { "snap:$(($_ -split '/')[4])" } })
+Assert 'all unplugged before the first snapshot' { ($ops[0..2] -join ',') -eq 'link:100,link:101,link:140' }
+Assert 'then each snapshotted, running (never paused)' { ($ops[3..5] -join ',') -eq 'snap:100,snap:101,snap:140' -and -not @($ops | Where-Object { $_ -like 'suspend*' }) }
+Assert 'then all plugged back in' { ($ops[6..8] -join ',') -eq 'link:100,link:101,link:140' -and @(& $cert { $script:PveLink.Values } | Where-Object { $_ -ne 'up' }).Count -eq 0 }
+Assert 'every snapshot recorded the VM unplugged' { @(& $cert { $script:SnapLink.Values } | Where-Object { $_ -ne 'down' }).Count -eq 0 }
 Assert 'MGMT never touched' { -not @($calls | Where-Object { $_ -match '/qemu/121/' -and $_ -notmatch '^GET' }) }
 $sets = @(Get-CertSnapshotSets -Lab $L -Members $members)
 Assert 'the set is listed once, on three VMs' { $sets.Count -eq 1 -and $sets[0].Count -eq 3 -and $sets[0].Name -eq $snapName }
@@ -234,6 +238,10 @@ $firstRollback = [array]::FindIndex([string[]] $calls, [Predicate[string]] { par
 $lastStop = [array]::FindLastIndex([string[]] $calls, [Predicate[string]] { param($c) $c -match '/status/stop' })
 Assert 'every VM stopped before any rollback' { @($calls | Where-Object { $_ -match '/status/stop' }).Count -eq 3 -and $lastStop -lt $firstRollback }
 Assert 'every VM rolled back' { @($calls | Where-Object { $_ -match '/rollback' }).Count -eq 3 }
+$allCalls = @(& $cert { $script:PveCalls })
+$lastRollback = [array]::FindLastIndex([string[]] $allCalls, [Predicate[string]] { param($c) $c -match '/rollback' })
+$firstPlug = [array]::FindIndex([string[]] $allCalls, [Predicate[string]] { param($c) $c -match '^PUT .*/config$' })
+Assert 'plugged back in only after every rollback' { $firstPlug -gt $lastRollback -and @(& $cert { $script:PveLink.Values } | Where-Object { $_ -ne 'up' }).Count -eq 0 }
 Assert-Throws 'a VM without the snapshot stops the revert before anything changes' { Restore-CertSnapshotSet -Lab $L -Vms $vms -Name 'CERT-000000-0000-00' } '*has no snapshot*'
 Assert-Throws 'only CERT snapshots can be removed' { Remove-CertPveSnapshot -Lab $L -Vm $vms[0].Vm -Name 'before-upgrade' } '*Not a CERT snapshot*'
 
