@@ -663,7 +663,7 @@ function Start-CertRun {
     Write-Host 'Breaking...'
     $ctx = [pscustomobject]@{ Lab = $Lab; Config = $Config; Run = $run; Targets = $targets; Assessor = $assessor; ModulePath = $Module.Path; ConnectTimeoutSeconds = 300 }
     try {
-        $out = & (Join-Path $Module.Path $m.break) -Context $ctx
+        $out = Invoke-CertModuleScript -Path (Join-Path $Module.Path $m.break) -Context $ctx
         $run.state = 'Broken'
         Add-CertRunEvent -Config $Config -Run $run -Event 'broken' -Detail $(if ($Blind) { 'details hidden (blind run)' } else { (@($out) | ForEach-Object { "$_" }) -join '; ' })
     } catch {
@@ -703,7 +703,7 @@ function Invoke-CertVerify {
     }
     $ctx = [pscustomobject]@{ Lab = $Lab; Config = $Config; Run = $Run; Targets = $targets; Assessor = (Get-CertAssessor -Config $Config -Lab $Lab); ModulePath = $Module.Path }
     try {
-        @(& (Join-Path $Module.Path $m.verify) -Context $ctx) | Where-Object { $_ } | ForEach-Object {
+        @(Invoke-CertModuleScript -Path (Join-Path $Module.Path $m.verify) -Context $ctx) | Where-Object { $_ } | ForEach-Object {
             $sev = if ($_.Passed) { 'Pass' } elseif ($_.Severity) { [string] $_.Severity } else { 'Critical' }
             [pscustomobject]@{ source = 'module'; on = $_.On; id = $_.Name; passed = [bool] $_.Passed; severity = $sev; detail = $_.Detail }
         }
@@ -882,6 +882,20 @@ function Set-CertTargetLink {
     $vm = Assert-CertLabVm -Lab $Context.Lab -Instance $Instance
     Set-CertPveVmLink -Lab $Context.Lab -Vm $vm -Up $Up
     "$($Instance.name) network $(if ($Up) { 'connected' } else { 'disconnected' })"
+}
+
+function Invoke-CertModuleScript {
+    # Runs a module's break.ps1 or verify.ps1 in a scope of its own, outside
+    # CERT's module. Run from inside it (`& $path`), the script gets a new
+    # script scope in CERT's session state, and every CERT function it calls
+    # then looks up its $script: variables there: the WinRM session option,
+    # cached credentials and tokens all came back $null, so no module could
+    # reach a guest (0.2.5 and before). The script still sees every exported
+    # CERT function, and the lab's (imported -Global).
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [string] $Path, [Parameter(Mandatory)] $Context)
+    $own = [psmoduleinfo]::new($true)
+    & $own { param($ScriptPath, $ScriptContext) & $ScriptPath -Context $ScriptContext } $Path $Context
 }
 
 function Invoke-CertTarget {

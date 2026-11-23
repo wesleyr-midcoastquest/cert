@@ -268,7 +268,7 @@ $realCreds = & $cert { ${function:Get-CertCredentials} }
     $script:FakeTcp = $false; $script:FakeLogon = $null; $script:FakeMacs = @('', 'BC2411000001')
     function script:Get-CertCredentials { param($Lab) foreach ($u in 'LAB\Administrator', 'LAB\svc-labdeploy') { [pscredential]::new($u, (ConvertTo-SecureString 'x' -AsPlainText -Force)) } }
     function script:Test-Connection { param($TargetName, $TcpPort, $TimeoutSeconds, [switch] $Quiet) $script:FakeTcp }
-    function script:New-PSSession { param($ComputerName, $Port, [switch] $UseSSL, $Authentication, $Credential, $SessionOption, $ErrorAction) if ($script:FakeLogon) { throw $script:FakeLogon }; [pscustomobject]@{ Fake = $ComputerName } }
+    function script:New-PSSession { param($ComputerName, $Port, [switch] $UseSSL, $Authentication, $Credential, [ValidateNotNull()] $SessionOption, $ErrorAction) if ($script:FakeLogon) { throw $script:FakeLogon }; [pscustomobject]@{ Fake = $ComputerName } }
     function script:Invoke-Command { param($Session, $ScriptBlock, $ArgumentList, $ErrorAction) if ($ScriptBlock.ToString() -match 'Get-NetAdapter') { $script:FakeMacs } elseif ($ScriptBlock.ToString() -match 'ran') { 'ran' } }
     function script:Remove-PSSession { param($Session, $ErrorAction) }
 }
@@ -291,6 +291,19 @@ Assert 'every target answering: how long each took' { (Wait-CertGuests -Lab $L -
 & $cert { $script:FakeTcp = $false }
 Assert-Throws "Can't reach says why" { Invoke-CertGuest -Lab $L -Instance $dc0 -TimeoutSeconds 0 -ScriptBlock { 'ran' } } "*Can't reach DC-261101-00*port 5986 didn't answer*"
 Assert-Throws 'a target that does not answer stops the wait, with the reason' { Wait-CertGuests -Lab $L -Instances @($dc0) -TimeoutSeconds 0 } "*DC-261101-00 (10.50.10.10) didn't answer*within 0 s*port 5986*"
+$modScript = Join-Path $tmp 'module-script.ps1'
+Set-Content -Path $modScript -Value @'
+param($Context)
+"version $(Get-CertVersion)"
+Invoke-CertTarget -Context $Context -Instance $Context.Targets.dc -TimeoutSeconds 1 -ScriptBlock { 'ran' }
+'@
+& $cert { $script:FakeTcp = $true }
+$ctx = [pscustomobject]@{ Lab = $L; Targets = [ordered]@{ dc = $dc0 } }
+$out = @(Invoke-CertModuleScript -Path $modScript -Context $ctx)
+Assert "a module script sees CERT's own state and reaches a guest" { $out[0] -eq "version $(Get-CertVersion)" -and $out[1] -eq 'ran' }
+$trap = [Collections.Generic.List[object]]::new()
+try { & $cert { param($p, $c) & $p -Context $c } $modScript $ctx 2>$null | ForEach-Object { $trap.Add($_) } } catch { $trap.Add("threw: $($_.Exception.Message)") }
+Assert "run from inside the module it would not (the 0.2.5 bug): CERT's state looks empty" { $trap[0] -eq 'version ' -and $trap[1] -like 'threw:*' }
 $failedRun = [pscustomobject]@{ id = 'CERT-261123-1649-00'; state = 'BreakFailed'; blind = $false; timeline = @(); updated_utc = $null }
 $timeMod = @($mods | Where-Object Id -eq 'dc-time-skew')[0]
 Assert 'a failed break is not checked' { -not (Test-CertBreak -Config $config -Lab $L -Run $failedRun -Module $timeMod 3>$null) -and @($failedRun.timeline).Count -eq 0 }

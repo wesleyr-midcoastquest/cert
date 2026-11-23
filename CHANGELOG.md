@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.6 (Nov 2026): modules can reach the lab again
+
+- **Every module's `break.ps1` and `verify.ps1` now run in a scope of their
+  own** (`Invoke-CertModuleScript`). CERT ran them from inside its own
+  module, where PowerShell gives the script a new script scope that CERT's
+  functions then used for their `$script:` variables. The WinRM session
+  option came back empty, so `New-PSSession` refused before reaching the
+  network: no break that connects to a guest could run, and every
+  `verify.ps1` that does threw, which CERT counted as the break being
+  visible. 0.2.5's new "Can't reach" reason is what showed it.
+- 0.2.5's guess that a DC stopped answering after the setup step was wrong:
+  it was this. The wait for the targets stays (it costs a second).
+
 ## 0.2.5 (Nov 2026): wait for the targets before breaking
 
 - **Before the break, CERT waits (up to 5 minutes) until every target
