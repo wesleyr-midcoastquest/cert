@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.10 (Nov 2026): fixes for fsmo-holder-lost runs
+
+- **The engagement account is on every DC before anything is broken.** CERT
+  creates it on the first DC, which in a typical lab is the PDC emulator, the
+  DC fsmo-holder-lost switches off a second or two later: before AD's own
+  change notification (about 15 s) had told the other DC. CERT now pulls
+  replication until every DC has the account (timeline: `account replicated`),
+  and if one still doesn't after 2 minutes, the run is `BreakFailed` with
+  nothing broken.
+- **A `verify.ps1` that throws no longer counts as the break being visible.**
+  "Check the break took" says the module's checks couldn't run, and why.
+- **Both checks say what they're doing**: which machine's lab validation is
+  running and how long it took, then the module's own checks. With a DC
+  down, the lab's validation on the survivor took many minutes with nothing
+  on screen.
+- **The PDC lookup asks DCs Proxmox shows as running first**, so a scenario's
+  switched-off DC no longer costs a minute in every check.
+
 ## 0.2.9 (Nov 2026): replication synced after a revert
 
 - **Every revert (and the snapshot test) ends with each DC pulling every

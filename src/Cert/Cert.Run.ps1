@@ -212,10 +212,14 @@ function Test-CertPreflight {
 # ── Targets ───────────────────────────────────────────────────────────────
 
 function Get-CertPdcInstance {
-    # The DC holding the PDC emulator, asked of any reachable active DC.
+    # The DC holding the PDC emulator, asked of any reachable active DC. DCs
+    # Proxmox shows as not running are asked last: a scenario may have switched
+    # one off, and waiting for it costs a minute each time.
     [CmdletBinding()]
     param([Parameter(Mandatory)] $Lab)
-    foreach ($dc in Get-CertActiveInstances -Lab $Lab -Role 'DC') {
+    $all = @(Get-CertActiveInstances -Lab $Lab -Role 'DC')
+    $up = @($all | Where-Object { $v = Get-CertPveVm -Lab $Lab -VmId ([int] $_.vmid); -not $v -or $v.Status -eq 'running' })
+    foreach ($dc in @($up) + @($all | Where-Object { $up.name -notcontains $_.name })) {
         try {
             $pdc = Invoke-CertGuest -Lab $Lab -Instance $dc -ScriptBlock { (Get-ADDomain).PDCEmulator }
             $short = ([string] $pdc).Split('.')[0]
@@ -364,6 +368,30 @@ function Sync-CertDcReplication {
         $line
     }
     $out -join ' | '
+}
+
+function Confirm-CertEngagementReplicated {
+    # Pulls replication until every active DC has the engagement account (by
+    # SID), or throws naming the DCs that still don't.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] $Lab, [Parameter(Mandatory)] [string] $Sid, [int] $TimeoutSeconds = 120)
+    $dcs = @(Get-CertActiveInstances -Lab $Lab -Role 'DC')
+    $started = Get-Date
+    $deadline = $started.AddSeconds($TimeoutSeconds)
+    do {
+        $null = Sync-CertDcReplication -Lab $Lab
+        $missing = @(foreach ($d in $dcs) {
+            $has = Invoke-CertGuest -Lab $Lab -Instance $d -ArgumentList $Sid -ScriptBlock {
+                param($Sid)
+                Import-Module ActiveDirectory
+                try { [bool] (Get-ADUser -Identity $Sid -Server localhost -ErrorAction Stop) } catch { $false }
+            }
+            if (-not $has) { $d.name }
+        })
+        if (-not $missing) { return "on $(@($dcs.name) -join ', ') after $([int] ((Get-Date) - $started).TotalSeconds) s" }
+        if ((Get-Date) -lt $deadline) { Start-Sleep -Seconds 10 }
+    } while ((Get-Date) -lt $deadline)
+    throw "the engagement account still isn't on $($missing -join ', ') after $TimeoutSeconds s of replication"
 }
 
 function Repair-CertSysvol {
@@ -681,6 +709,20 @@ function Start-CertRun {
         throw "Run $($run.id) is open, but setting up after the snapshot failed: $($_.Exception.Message) Nothing has been broken. Revert the run (menu 9) to clean up."
     }
 
+    # The engagement account is created on one DC, and a scenario may switch
+    # that DC off seconds later, before AD's own change notification (about 15
+    # s) has told the others. Make sure every DC has it before breaking.
+    if ($run.engagement.account -and @(Get-CertActiveInstances -Lab $Lab -Role 'DC').Count -gt 1) {
+        try {
+            Add-CertRunEvent -Config $Config -Run $run -Event 'account replicated' -Detail (Confirm-CertEngagementReplicated -Lab $Lab -Sid $run.engagement.sid -TimeoutSeconds 120)
+        } catch {
+            $run.state = 'BreakFailed'
+            Add-CertRunEvent -Config $Config -Run $run -Event 'break failed' -Detail "Nothing was broken: $($_.Exception.Message)"
+            Write-Warning 'Nothing was broken. Revert the run (menu 9), then start it again.'
+            return $run
+        }
+    }
+
     # Setup changes every machine's firewall, and a machine can stop answering
     # WinRM for a while afterwards (a DC running Tailscale did, for at least a
     # minute; why isn't known). Wait until every target answers before breaking.
@@ -746,6 +788,17 @@ function Invoke-CertVerify {
     } catch { [pscustomobject]@{ source = 'module'; on = $null; id = 'verify'; passed = $false; severity = 'Critical'; detail = "verify.ps1 threw: $($_.Exception.Message)" } }
 }
 
+function Invoke-CertLabValidationShown {
+    # Invoke-CertLabValidation, saying what it's doing: with a DC down, the lab's
+    # validation on the others can take many minutes with nothing on screen.
+    param([Parameter(Mandatory)] $Lab, [Parameter(Mandatory)] $Instance)
+    Write-Host "  lab validation on $($Instance.name) (with a machine down this can take up to 15 minutes)..."
+    $t0 = Get-Date
+    $rep = Invoke-CertLabValidation -Lab $Lab -Instance $Instance
+    Write-Host "    $($Instance.name): $(if ($rep) { "$($rep.status)" } else { 'no report' }) after $(Format-CertDuration ((Get-Date) - $t0))"
+    $rep
+}
+
 function Test-CertBreak {
     # Did the break show up as the module said it would? Each expected lab
     # validation failure is looked for, and the module's own verify.ps1 should
@@ -760,7 +813,7 @@ function Test-CertBreak {
     $seen = @{}
     if (@($m.expected_failures | Where-Object { $_ }).Count) {
         foreach ($i in Get-CertValidationSet -Lab $Lab -Run $Run -Manifest $m) {
-            $rep = Invoke-CertLabValidation -Lab $Lab -Instance $i
+            $rep = Invoke-CertLabValidationShown -Lab $Lab -Instance $i
             if (-not $rep) { continue }
             foreach ($r in @($rep.results | Where-Object { -not $_.passed })) { $seen[$r.id] = @(@($seen[$r.id]) + $i.name | Where-Object { $_ }) }
         }
@@ -771,9 +824,14 @@ function Test-CertBreak {
     $missing = @($Run.expected | Where-Object { -not $_.seen } | ForEach-Object id)
     $verifyOk = $true
     if ($m.verify) {
-        $failing = @(Invoke-CertVerify -Config $Config -Lab $Lab -Run $Run -Module $Module | Where-Object { -not $_.passed -and $_.severity -in 'Critical', 'High' })
+        Write-Host "  the module's own checks..."
+        $vr = @(Invoke-CertVerify -Config $Config -Lab $Lab -Run $Run -Module $Module)
+        # verify.ps1 throwing proves nothing about the break: it couldn't check.
+        $threw = @($vr | Where-Object { $_.id -eq 'verify' -and $_.detail -like 'verify.ps1 threw:*' })
+        $failing = @($vr | Where-Object { -not $_.passed -and $_.severity -in 'Critical', 'High' -and $threw -notcontains $_ })
         $verifyOk = $failing.Count -gt 0
-        if (-not $verifyOk) { $missing += "the module's own checks (verify.ps1 still passes)" }
+        if ($threw) { $missing += "the module's own checks (couldn't check: $($threw[0].detail))" }
+        elseif (-not $verifyOk) { $missing += "the module's own checks (verify.ps1 still passes)" }
     }
     $detail = if ($missing) { "not seen yet: $($missing -join ', ') (some show only after a while; check again before handing over)" } else { 'every expected failure seen' }
     Add-CertRunEvent -Config $Config -Run $Run -Event 'break checked' -Detail $(if ($Run.blind) { if ($missing) { 'not everything expected is visible yet' } else { 'the break took' } } else { $detail })
@@ -806,7 +864,7 @@ function Test-CertRepair {
     $m = $Module.Manifest
     $results = @()
     foreach ($i in Get-CertValidationSet -Lab $Lab -Run $Run -Manifest $m) {
-        $rep = Invoke-CertLabValidation -Lab $Lab -Instance $i
+        $rep = Invoke-CertLabValidationShown -Lab $Lab -Instance $i
         if (-not $rep) {
             $reach = Test-CertGuestReachable -Lab $Lab -Instance $i
             $results += [pscustomobject]@{ source = 'lab'; on = $i.name; id = 'REACH'; passed = $reach; severity = if ($reach) { 'Pass' } else { 'Critical' }; detail = if ($reach) { 'no lab validation on this machine' } else { 'CERT cannot reach it over WinRM/HTTPS' } }
@@ -814,6 +872,7 @@ function Test-CertRepair {
         }
         foreach ($r in @($rep.results)) { $results += [pscustomobject]@{ source = 'lab'; on = $i.name; id = $r.id; passed = [bool] $r.passed; severity = $r.severity; detail = $r.detail } }
     }
+    if ($m.verify) { Write-Host "  the module's own checks..." }
     $results += @(Invoke-CertVerify -Config $Config -Lab $Lab -Run $Run -Module $Module)
     $blocking = @($results | Where-Object { -not $_.passed -and $_.severity -in 'Critical', 'High' })
     $ok = ($blocking.Count -eq 0)
