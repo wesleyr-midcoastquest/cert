@@ -14,7 +14,7 @@ $suffix = [string] $inv.identity.administrative_model.account_suffix
 $admins = @($inv.identity.administrative_model.administrators | Where-Object { [int] $_.tier -eq 0 } | ForEach-Object { "$($_.username)$suffix" })
 $skip = @('svc-labdeploy', ($Context.Run.engagement.account -split '\\')[-1]) | Where-Object { $_ }
 
-$r = Invoke-CertTarget -Context $Context -Instance $Context.Targets.dc -ArgumentList (, $admins), (, $skip) -ScriptBlock {
+$r = Invoke-CertTarget -Context $Context -Instance $Context.Targets.dc -ArgumentList $admins, $skip -ScriptBlock {
     param($Admins, $Skip)
     Import-Module ActiveDirectory
     function New-Junk { -join ((1..32) | ForEach-Object { [char] (Get-Random -Minimum 33 -Maximum 126) }) + 'aA1!' }

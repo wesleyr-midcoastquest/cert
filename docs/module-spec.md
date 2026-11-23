@@ -122,8 +122,12 @@ Check the **outcome**, not the method: "every FSMO role is on a live DC", not
    so nothing would undo the change.
 3. **Code inside `-ScriptBlock` runs in Windows PowerShell 5.1** on the guest.
    No `??`, no ternaries, no `ForEach-Object -Parallel`. Pass values in with
-   `-ArgumentList`; variables from the outer script aren't there. Wrap an
-   array argument as `(, $array)`, or it arrives as separate arguments.
+   `-ArgumentList`; variables from the outer script aren't there. Give
+   several values as they are: `-ArgumentList $names, $other`, where `$names`
+   arrives as an array. Only a lone array needs wrapping, `-ArgumentList
+   (, $names)`, or its items arrive as separate arguments. Wrapping one of
+   several, `(, $names), $other`, delivers an array inside an array, which
+   AD cmdlets refuse; the module check flags it.
 4. **Keep CERT's way in working.** CERT reaches guests as the built-in domain
    Administrator, or `svc-labdeploy` if that fails. A module may change one of
    them, never both. The briefing should put the other out of scope, the way

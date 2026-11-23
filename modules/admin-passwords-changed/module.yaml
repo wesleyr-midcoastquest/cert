@@ -1,5 +1,5 @@
 id: admin-passwords-changed
-version: 1.0.1
+version: 1.0.2
 name: Domain admin passwords changed
 summary: Every Tier 0 admin password was reset by an intruder, who left a domain admin account behind
 category: Identity
