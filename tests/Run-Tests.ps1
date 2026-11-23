@@ -212,7 +212,7 @@ Write-Host 'Snapshot and revert sequences (fake Proxmox)'
         param($Lab, $Method, $Path, $Body)
         $script:PveCalls.Add("$Method $Path")
         switch -Regex ("$Method $Path") {
-            '^GET /cluster/resources' { return @(100, 101, 121, 140 | ForEach-Object { [pscustomobject]@{ vmid = $_; node = 'pve01'; status = 'running'; name = @{ 100 = 'DC-261101-00'; 101 = 'DC-261101-01'; 121 = 'MGMT-261102-00'; 140 = 'W11-261103-00' }[$_]; tags = $script:FakeTag; pool = $script:FakePool; maxmem = 4GB } }) }
+            '^GET /cluster/resources' { return @(100, 101, 121, 140 | ForEach-Object { [pscustomobject]@{ vmid = $_; node = 'pve01'; status = $(if ($script:PveState[$_] -eq 'stopped') { 'stopped' } else { 'running' }); name = @{ 100 = 'DC-261101-00'; 101 = 'DC-261101-01'; 121 = 'MGMT-261102-00'; 140 = 'W11-261103-00' }[$_]; tags = $script:FakeTag; pool = $script:FakePool; maxmem = 4GB } }) }
             '^GET /nodes/\w+/qemu/(\d+)/snapshot$' { return @($script:PveSnaps[[int] $Matches[1]] | Where-Object { $_ } | ForEach-Object { [pscustomobject]@{ name = $_; vmstate = 1; snaptime = 1762400000; description = 'ledger=0123456789ab' } }) }
             '^POST /nodes/\w+/qemu/(\d+)/snapshot$' { $script:PveSnaps[[int] $Matches[1]] = @($script:PveSnaps[[int] $Matches[1]]) + $Body.snapname; $script:SnapLink[[int] $Matches[1]] = $script:PveLink[[int] $Matches[1]]; return 'UPID:pve01:x' }
             '^GET /nodes/\w+/qemu/(\d+)/config$' { $l = if ($script:PveLink[[int] $Matches[1]] -eq 'down') { ',link_down=1' } else { '' }; return [pscustomobject]@{ net0 = "virtio=BC:24:11:00:00:01,bridge=vmbr2$l"; description = $script:PveDesc[[int] $Matches[1]] } }
@@ -284,7 +284,8 @@ $realCreds = & $cert { ${function:Get-CertCredentials} }
     function script:Get-CertCredentials { param($Lab) foreach ($u in 'LAB\Administrator', 'LAB\svc-labdeploy') { [pscredential]::new($u, (ConvertTo-SecureString 'x' -AsPlainText -Force)) } }
     function script:Test-Connection { param($TargetName, $TcpPort, $TimeoutSeconds, [switch] $Quiet) $script:FakeTcp }
     function script:New-PSSession { param($ComputerName, $Port, [switch] $UseSSL, $Authentication, $Credential, [ValidateNotNull()] $SessionOption, $ErrorAction) if ($script:FakeLogon) { throw $script:FakeLogon }; [pscustomobject]@{ Fake = $ComputerName } }
-    function script:Invoke-Command { param($Session, $ScriptBlock, $ArgumentList, $ErrorAction) if ($ScriptBlock.ToString() -match 'Get-NetAdapter') { $script:FakeMacs } elseif ($ScriptBlock.ToString() -match 'ran') { 'ran' } }
+    $script:AskedPdc = [Collections.Generic.List[string]]::new()
+    function script:Invoke-Command { param($Session, $ScriptBlock, $ArgumentList, $ErrorAction) if ($ScriptBlock.ToString() -match 'Get-NetAdapter') { $script:FakeMacs } elseif ($ScriptBlock.ToString() -match 'PDCEmulator') { $script:AskedPdc.Add($Session.Fake); 'DC-261101-01.lab.test' } elseif ($ScriptBlock.ToString() -match 'ran') { 'ran' } }
     function script:Remove-PSSession { param($Session, $ErrorAction) }
 }
 $dc0 = $L.Instances | Where-Object name -eq 'DC-261101-00'
@@ -319,6 +320,17 @@ Assert "a module script sees CERT's own state and reaches a guest" { $out[0] -eq
 $trap = [Collections.Generic.List[object]]::new()
 try { & $cert { param($p, $c) & $p -Context $c } $modScript $ctx 2>$null | ForEach-Object { $trap.Add($_) } } catch { $trap.Add("threw: $($_.Exception.Message)") }
 Assert "run from inside the module it would not (the 0.2.5 bug): CERT's state looks empty" { $trap[0] -eq 'version ' -and $trap[1] -like 'threw:*' }
+& $cert { $script:FakeTcp = $true; $script:PveState[100] = 'stopped' }
+$pdcNow = Get-CertPdcInstance -Lab $L
+Assert 'the PDC lookup asks a running DC, not the one switched off' { $pdcNow.name -eq 'DC-261101-01' -and (@(& $cert { $script:AskedPdc }) -join ',') -eq '10.50.10.11' }
+& $cert { $script:PveState[100] = 'running'; $script:FakeTcp = $false }
+$throwMod = Join-Path $tmp 'throwing-verify'
+New-Item -ItemType Directory -Path $throwMod -Force | Out-Null
+Set-Content (Join-Path $throwMod 'verify.ps1') "param(`$Context)`nthrow 'no route to the DC'"
+$brokenRun = [pscustomobject]@{ id = 'CERT-261123-1854-00'; state = 'Broken'; blind = $false; targets = [pscustomobject]@{}; expected = @(); timeline = @(); updated_utc = $null }
+$tm = [pscustomobject]@{ Manifest = [pscustomobject]@{ expected_failures = @(); verify = 'verify.ps1' }; Path = $throwMod }
+$took = Test-CertBreak -Config $config -Lab $L -Run $brokenRun -Module $tm 6>$null
+Assert "a verify.ps1 that throws doesn't prove the break" { -not $took -and $brokenRun.timeline[-1].detail -like "*couldn't check: verify.ps1 threw: no route to the DC*" }
 $failedRun = [pscustomobject]@{ id = 'CERT-261123-1649-00'; state = 'BreakFailed'; blind = $false; timeline = @(); updated_utc = $null }
 $timeMod = @($mods | Where-Object Id -eq 'dc-time-skew')[0]
 Assert 'a failed break is not checked' { -not (Test-CertBreak -Config $config -Lab $L -Run $failedRun -Module $timeMod 3>$null) -and @($failedRun.timeline).Count -eq 0 }
@@ -360,6 +372,7 @@ Write-Host 'SYSVOL after a revert (fake guests)'
         if ($t -match 'Start-Service DFSR') { $script:GuestLog.Add("start:$n"); return }
         if ($t -match 'msDFSR-Enabled') { $script:GuestLog.Add("sub:$($ArgumentList[0]):$($ArgumentList[1]):$($ArgumentList[2])"); return }
         if ($t -match 'Get-ADReplicationPartnerMetadata') { $script:GuestLog.Add("sync:$n"); return $script:Repl[$n] }
+        if ($t -match 'Get-ADUser -Identity \$Sid') { $script:GuestLog.Add("has:$n"); return $script:HasAccount[$n] }
         if ($t -match 'pollad') { $script:Sysvol[$n] = 4; $script:GuestLog.Add("wait:$n"); return 4 }
         return $script:Sysvol[$n]
     }
@@ -380,6 +393,10 @@ Assert 'a partition that fails, and a count still standing, are reported' { $sr 
 $L1 = Get-CertLab -Config $config
 $L1.Instances = @($L1.Instances | Where-Object name -ne 'DC-261101-01')
 Assert 'one DC: nothing to replicate' { (Sync-CertDcReplication -Lab $L1) -like 'single DC*' }
+& $cert { $script:Repl['DC-261101-00'] = [pscustomobject]@{ Ok = 3; Bad = @(); Left = @() }; $script:HasAccount = @{ 'DC-261101-00' = $true; 'DC-261101-01' = $true }; $script:GuestLog.Clear() }
+Assert 'engagement account on every DC: replicated first, then found on each' { (Confirm-CertEngagementReplicated -Lab $L -Sid 'S-1-5-21-1-2-3-1150' -TimeoutSeconds 0) -like 'on DC-261101-00, DC-261101-01 after*' -and (@(& $cert { $script:GuestLog }) -join ',') -eq 'sync:DC-261101-00,sync:DC-261101-01,has:DC-261101-00,has:DC-261101-01' }
+& $cert { $script:HasAccount['DC-261101-01'] = $false }
+Assert-Throws 'a DC without it stops the run before the break' { Confirm-CertEngagementReplicated -Lab $L -Sid 'S-1-5-21-1-2-3-1150' -TimeoutSeconds 0 } "*isn't on DC-261101-01*"
 
 Write-Host 'Pre-flight'
 $pf = Test-CertPreflight -Config $config -Lab $L -SkipBaseline
