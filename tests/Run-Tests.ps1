@@ -350,6 +350,7 @@ Write-Host 'SYSVOL after a revert (fake guests)'
 & $cert {
     $script:GuestLog = [Collections.Generic.List[string]]::new()
     $script:Sysvol = @{ 'DC-261101-00' = 2; 'DC-261101-01' = 2 }
+    $script:Repl = @{ 'DC-261101-00' = [pscustomobject]@{ Ok = 3; Bad = @(); Left = @() }; 'DC-261101-01' = [pscustomobject]@{ Ok = 3; Bad = @(); Left = @() } }
     function script:Get-CertPdcInstance { param($Lab) @($Lab.Instances | Where-Object name -eq 'DC-261101-00')[0] }
     function script:Invoke-CertGuest {
         param($Lab, $Instance, [scriptblock] $ScriptBlock, [object[]] $ArgumentList = @(), [int] $TimeoutSeconds)
@@ -358,7 +359,7 @@ Write-Host 'SYSVOL after a revert (fake guests)'
         if ($t -match 'Stop-Service DFSR') { $script:GuestLog.Add("stop:$n"); return }
         if ($t -match 'Start-Service DFSR') { $script:GuestLog.Add("start:$n"); return }
         if ($t -match 'msDFSR-Enabled') { $script:GuestLog.Add("sub:$($ArgumentList[0]):$($ArgumentList[1]):$($ArgumentList[2])"); return }
-        if ($t -match 'repadmin') { $script:GuestLog.Add("sync"); return }
+        if ($t -match 'Get-ADReplicationPartnerMetadata') { $script:GuestLog.Add("sync:$n"); return $script:Repl[$n] }
         if ($t -match 'pollad') { $script:Sysvol[$n] = 4; $script:GuestLog.Add("wait:$n"); return 4 }
         return $script:Sysvol[$n]
     }
@@ -367,11 +368,18 @@ $r = Repair-CertSysvol -Lab $L 6>$null
 $log = @(& $cert { $script:GuestLog })
 Assert 'stuck SYSVOL: re-synced from the PDC' { $r -like 'SYSVOL re-synced from DC-261101-00*' }
 Assert 'stops DFSR everywhere first' { ($log[0..1] -join ',') -eq 'stop:DC-261101-00,stop:DC-261101-01' }
-Assert 'PDC marked authoritative, the other disabled, then replicated' { ($log[2..4] -join ',') -eq 'sub:DC-261101-00:False:True,sub:DC-261101-01:False:False,sync' }
+Assert 'PDC marked authoritative, the other disabled, then every DC pulls' { ($log[2..5] -join ',') -eq 'sub:DC-261101-00:False:True,sub:DC-261101-01:False:False,sync:DC-261101-00,sync:DC-261101-01' }
 Assert 'PDC back to Normal before the other starts' { [array]::IndexOf([string[]] $log, 'wait:DC-261101-00') -lt [array]::IndexOf([string[]] $log, 'start:DC-261101-01') }
 Assert 'the other enabled and waited for' { $log -contains 'sub:DC-261101-01:True:False' -and $log[-1] -eq 'wait:DC-261101-01' }
 & $cert { $script:GuestLog.Clear() }
 Assert 'healthy SYSVOL: nothing touched' { (Repair-CertSysvol -Lab $L) -like '*already normal*' -and @(& $cert { $script:GuestLog }).Count -eq 0 }
+Assert 'replication sync: every DC pulls, and says so' { (Sync-CertDcReplication -Lab $L) -eq 'DC-261101-00: 3 partition(s) pulled | DC-261101-01: 3 partition(s) pulled' -and (@(& $cert { $script:GuestLog }) -join ',') -eq 'sync:DC-261101-00,sync:DC-261101-01' }
+& $cert { $script:Repl['DC-261101-00'] = [pscustomobject]@{ Ok = 2; Bad = @('DC=DomainDnsZones: error 8440'); Left = @('DC-261101-01 error 1256') } }
+$sr = Sync-CertDcReplication -Lab $L
+Assert 'a partition that fails, and a count still standing, are reported' { $sr -like '*DC-261101-00: 2 partition(s) pulled; failed: DC=DomainDnsZones: error 8440; still failing from DC-261101-01 error 1256 |*' }
+$L1 = Get-CertLab -Config $config
+$L1.Instances = @($L1.Instances | Where-Object name -ne 'DC-261101-01')
+Assert 'one DC: nothing to replicate' { (Sync-CertDcReplication -Lab $L1) -like 'single DC*' }
 
 Write-Host 'Pre-flight'
 $pf = Test-CertPreflight -Config $config -Lab $L -SkipBaseline

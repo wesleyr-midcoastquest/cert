@@ -333,6 +333,39 @@ function Restore-CertSnapshotSet {
     foreach ($v in $Vms) { Write-Host "    plug in $($v.Instance.name)"; Set-CertPveVmLink -Lab $Lab -Vm $v.Vm -Up $true }
 }
 
+function Sync-CertDcReplication {
+    # Every DC pulls each partition from each of its inbound partners
+    # (repadmin /replicate, one at a time), then reports what still counts as
+    # failing. After a revert the DCs come back at slightly different moments;
+    # a DC that tried to replicate from one still stopped keeps a failure count
+    # (lab check REPL-001, which then blocks the next run's pre-flight) until
+    # its next successful pull, up to an hour in a quiet lab. repadmin /syncall
+    # /AdeP, used before, pushes outbound and stops at the first partition it
+    # can't sync ("The naming context specified ... is invalid").
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] $Lab)
+    $dcs = @(Get-CertActiveInstances -Lab $Lab -Role 'DC')
+    if ($dcs.Count -le 1) { return 'single DC; nothing to replicate' }
+    $out = foreach ($d in $dcs) {
+        $r = Invoke-CertGuest -Lab $Lab -Instance $d -TimeoutSeconds 300 -ScriptBlock {
+            Import-Module ActiveDirectory
+            $ok = 0; $bad = @()
+            foreach ($m in @(Get-ADReplicationPartnerMetadata -Target $env:COMPUTERNAME -PartnerType Inbound -Partition *)) {
+                $text = (& repadmin.exe /replicate $env:COMPUTERNAME $m.PartnerAddress $m.Partition 2>&1 | Where-Object { $_ }) -join ' '
+                if ($LASTEXITCODE -eq 0 -and $text -match 'completed successfully') { $ok++ } else { $bad += "$($m.Partition): $text" }
+            }
+            $left = @(Get-ADReplicationFailure -Target $env:COMPUTERNAME -Scope Server -ErrorAction SilentlyContinue | Where-Object { $_.FailureCount -gt 0 } |
+                ForEach-Object { "$($_.Partner -replace '^CN=NTDS Settings,CN=([^,]+).*', '$1') error $($_.LastError)" })
+            [pscustomobject]@{ Ok = $ok; Bad = $bad; Left = $left }
+        }
+        $line = "$($d.name): $([int] $r.Ok) partition(s) pulled"
+        if (@($r.Bad).Count) { $line += "; failed: $(@($r.Bad) -join '; ')" }
+        if (@($r.Left).Count) { $line += "; still failing from $(@($r.Left) -join ', ')" }
+        $line
+    }
+    $out -join ' | '
+}
+
 function Repair-CertSysvol {
     # An authoritative SYSVOL sync from the PDC emulator, after a revert.
     #
@@ -371,7 +404,6 @@ function Repair-CertSysvol {
         if ($Authoritative) { $r['msDFSR-Options'] = 1 }
         Set-ADObject -Identity $dn -Replace $r -Server localhost
     }
-    $sync = { & repadmin.exe /syncall /AdeP 2>&1 | Out-Null }
     $wait = {
         param($Want, $Seconds)
         $deadline = (Get-Date).AddSeconds($Seconds)
@@ -389,13 +421,13 @@ function Repair-CertSysvol {
     foreach ($d in $dcs) { Invoke-CertGuest -Lab $Lab -Instance $d -ScriptBlock { Stop-Service DFSR -Force } | Out-Null }
     Invoke-CertGuest -Lab $Lab -Instance $auth -ScriptBlock $setSub -ArgumentList $auth.name, $false, $true | Out-Null
     foreach ($d in $others) { Invoke-CertGuest -Lab $Lab -Instance $auth -ScriptBlock $setSub -ArgumentList $d.name, $false, $false | Out-Null }
-    Invoke-CertGuest -Lab $Lab -Instance $auth -ScriptBlock $sync | Out-Null
+    $null = Sync-CertDcReplication -Lab $Lab
 
     # 2. The PDC first: start, enable, wait for Normal (event 4602).
     Invoke-CertGuest -Lab $Lab -Instance $auth -ScriptBlock { Start-Service DFSR } | Out-Null
     Start-Sleep -Seconds 20
     Invoke-CertGuest -Lab $Lab -Instance $auth -ScriptBlock $setSub -ArgumentList $auth.name, $true, $false | Out-Null
-    Invoke-CertGuest -Lab $Lab -Instance $auth -ScriptBlock $sync | Out-Null
+    $null = Sync-CertDcReplication -Lab $Lab
     $s = Invoke-CertGuest -Lab $Lab -Instance $auth -ScriptBlock $wait -ArgumentList 4, $TimeoutSeconds
     if ($s -ne 4) { throw "SYSVOL on $($auth.name) didn't reach Normal (state $s) after the authoritative sync. Check its DFS Replication log (event 4602 expected)." }
 
@@ -403,7 +435,7 @@ function Repair-CertSysvol {
     foreach ($d in $others) { Invoke-CertGuest -Lab $Lab -Instance $d -ScriptBlock { Start-Service DFSR } | Out-Null }
     Start-Sleep -Seconds 20
     foreach ($d in $others) { Invoke-CertGuest -Lab $Lab -Instance $auth -ScriptBlock $setSub -ArgumentList $d.name, $true, $false | Out-Null }
-    Invoke-CertGuest -Lab $Lab -Instance $auth -ScriptBlock $sync | Out-Null
+    $null = Sync-CertDcReplication -Lab $Lab
     $bad = @()
     foreach ($d in $others) {
         $s = Invoke-CertGuest -Lab $Lab -Instance $d -ScriptBlock $wait -ArgumentList 4, $TimeoutSeconds
@@ -827,6 +859,8 @@ function Restore-CertRun {
     if (@($vms | Where-Object { $_.Instance.role -eq 'DC' }).Count) {
         $r = try { Repair-CertSysvol -Lab $Lab } catch { Write-Warning $_.Exception.Message; "failed: $($_.Exception.Message)" }
         Add-CertRunEvent -Config $Config -Run $Run -Event 'SYSVOL' -Detail $r
+        $s = try { Sync-CertDcReplication -Lab $Lab } catch { Write-Warning "Replication sync: $($_.Exception.Message)"; "failed: $($_.Exception.Message)" }
+        Add-CertRunEvent -Config $Config -Run $Run -Event 'replication' -Detail $s
     }
     if ($Run.engagement -and $Run.engagement.account) {
         $c = try { Clear-CertMgmtEngagement -Config $Config -Lab $Lab -Run $Run } catch { "couldn't clean up: $($_.Exception.Message)" }
@@ -858,6 +892,7 @@ function Test-CertSnapshotRoundTrip {
     Restore-CertSnapshotSet -Lab $Lab -Vms $pf.Vms -Name $name
     foreach ($v in $pf.Vms) { try { $null = Sync-CertGuestTime -Lab $Lab -Instance $v.Instance } catch { Write-Warning "Clock on $($v.Instance.name): $($_.Exception.Message)" } }
     $sysvol = if (@($pf.Vms | Where-Object { $_.Instance.role -eq 'DC' }).Count) { try { Repair-CertSysvol -Lab $Lab } catch { Write-Warning $_.Exception.Message; 'SYSVOL sync failed' } } else { 'no DCs' }
+    if (@($pf.Vms | Where-Object { $_.Instance.role -eq 'DC' }).Count) { try { $sysvol += "; replication: $(Sync-CertDcReplication -Lab $Lab)" } catch { Write-Warning "Replication sync: $($_.Exception.Message)"; $sysvol += '; replication sync failed' } }
     $t2 = Get-Date
     foreach ($v in $pf.Vms) { Remove-CertPveSnapshot -Lab $Lab -Vm $v.Vm -Name $name }
     "Snapshot of $($pf.Vms.Count) VM(s) took $(Format-CertDuration ($t1 - $t0)); revert, clocks and SYSVOL $(Format-CertDuration ($t2 - $t1)) ($sysvol). Test set removed."
