@@ -205,6 +205,7 @@ Write-Host 'Snapshot and revert sequences (fake Proxmox)'
     $script:PveState = @{ 100 = 'running'; 101 = 'running'; 140 = 'running' }
     $script:PveLink  = @{ 100 = 'up'; 101 = 'up'; 140 = 'up' }
     $script:SnapLink = @{}
+    $script:PveDesc  = @{}
     function script:Get-CertPveToken { 'fake' }
     function script:Wait-CertPveTask { }
     function script:Invoke-CertPve {
@@ -214,8 +215,14 @@ Write-Host 'Snapshot and revert sequences (fake Proxmox)'
             '^GET /cluster/resources' { return @(100, 101, 121, 140 | ForEach-Object { [pscustomobject]@{ vmid = $_; node = 'pve01'; status = 'running'; name = @{ 100 = 'DC-261101-00'; 101 = 'DC-261101-01'; 121 = 'MGMT-261102-00'; 140 = 'W11-261103-00' }[$_]; tags = $script:FakeTag; pool = $script:FakePool; maxmem = 4GB } }) }
             '^GET /nodes/\w+/qemu/(\d+)/snapshot$' { return @($script:PveSnaps[[int] $Matches[1]] | Where-Object { $_ } | ForEach-Object { [pscustomobject]@{ name = $_; vmstate = 1; snaptime = 1762400000; description = 'ledger=0123456789ab' } }) }
             '^POST /nodes/\w+/qemu/(\d+)/snapshot$' { $script:PveSnaps[[int] $Matches[1]] = @($script:PveSnaps[[int] $Matches[1]]) + $Body.snapname; $script:SnapLink[[int] $Matches[1]] = $script:PveLink[[int] $Matches[1]]; return 'UPID:pve01:x' }
-            '^GET /nodes/\w+/qemu/(\d+)/config$' { $l = if ($script:PveLink[[int] $Matches[1]] -eq 'down') { ',link_down=1' } else { '' }; return [pscustomobject]@{ net0 = "virtio=BC:24:11:00:00:01,bridge=vmbr2$l" } }
-            '^PUT /nodes/\w+/qemu/(\d+)/config$' { $id = [int] $Matches[1]; $script:PveLink[$id] = if ($Body.net0 -match 'link_down=1') { 'down' } else { 'up' }; return $null }
+            '^GET /nodes/\w+/qemu/(\d+)/config$' { $l = if ($script:PveLink[[int] $Matches[1]] -eq 'down') { ',link_down=1' } else { '' }; return [pscustomobject]@{ net0 = "virtio=BC:24:11:00:00:01,bridge=vmbr2$l"; description = $script:PveDesc[[int] $Matches[1]] } }
+            '^PUT /nodes/\w+/qemu/(\d+)/config$' {
+                $id = [int] $Matches[1]
+                if ($Body.ContainsKey('net0')) { $script:PveLink[$id] = if ($Body.net0 -match 'link_down=1') { 'down' } else { 'up' } }
+                if ($Body.ContainsKey('description')) { $script:PveDesc[$id] = $Body.description }
+                if ($Body.delete -eq 'description') { $script:PveDesc.Remove($id) }
+                return $null
+            }
             '^POST /nodes/\w+/qemu/(\d+)/snapshot/[^/]+/rollback' { $script:PveState[[int] $Matches[1]] = 'running'; $script:PveLink[[int] $Matches[1]] = $script:SnapLink[[int] $Matches[1]]; return 'UPID:pve01:x' }
             '^DELETE /nodes/\w+/qemu/(\d+)/snapshot/(.+)$' { $script:PveSnaps[[int] $Matches[1]] = @($script:PveSnaps[[int] $Matches[1]] | Where-Object { $_ -ne $Matches[2] }); return 'UPID:pve01:x' }
             '^POST /nodes/\w+/qemu/(\d+)/status/(\w+)' { $script:PveState[[int] $Matches[1]] = @{ suspend = 'paused'; resume = 'running'; stop = 'stopped'; start = 'running' }[$Matches[2]]; return 'UPID:pve01:x' }
@@ -321,6 +328,23 @@ Assert-Throws 'nor handed to the clock' { Start-CertClock -Config $config -Run $
     foreach ($n in 'Test-Connection', 'New-PSSession', 'Invoke-Command', 'Remove-PSSession') { Remove-Item "function:$n" }
     Set-Item function:script:Get-CertCredentials $c
 } $realCreds
+
+Write-Host "The engagement account in MGMT's Notes (fake Proxmox)"
+& $cert { $script:PveDesc[121] = "Lab MGMT. **Don't** edit by hand." }
+$noteRun = [pscustomobject]@{ id = 'CERT-261123-1752-00'; engagement = [pscustomobject]@{ access = 'domain-admin'; account = 'LAB\eng-261123175200'; upn = 'eng-261123175200@example.test'; password = 'Ab3#_*x`y' } }
+$where = Set-CertEngagementNote -Lab $L -Run $noteRun
+$desc = & $cert { $script:PveDesc[121] }
+Assert 'written to MGMT, which says where' { $where -eq 'MGMT-261102-00, Proxmox Notes' }
+Assert 'account and password in a code block, after the Notes already there' { $desc.StartsWith("Lab MGMT. **Don't** edit by hand.`n`n--- CERT run CERT-261123-1752-00: begin") -and $desc -match '(?s)```\nAccount:  LAB\\eng-261123175200\n.*Password: Ab3#_\*x`y\n```' }
+$null = Set-CertEngagementNote -Lab $L -Run $noteRun
+Assert 'written twice, still one block' { ([regex]::Matches((& $cert { $script:PveDesc[121] }), 'CERT run CERT-261123-1752-00: begin')).Count -eq 1 }
+Assert "another run's block is left alone" { (Remove-CertNoteBlock -Text "x`n--- CERT run CERT-1: begin (the revert removes this) ---`ny`n--- CERT run CERT-1: end ---" -RunId 'CERT-2') -like '*CERT run CERT-1: end ---' }
+Assert 'the revert takes the block out, and only it' { (Clear-CertEngagementNote -Lab $L -Run $noteRun) -like 'removed from MGMT-261102-00*' -and (& $cert { $script:PveDesc[121] }) -eq "Lab MGMT. **Don't** edit by hand." }
+Assert 'nothing to take out: no change' { $null -eq (Clear-CertEngagementNote -Lab $L -Run $noteRun) }
+& $cert { $script:PveDesc.Remove(121) }
+$null = Set-CertEngagementNote -Lab $L -Run $noteRun
+$null = Clear-CertEngagementNote -Lab $L -Run $noteRun
+Assert 'Notes that were empty are empty again' { -not (& $cert { $script:PveDesc.ContainsKey(121) }) }
 
 Write-Host 'SYSVOL after a revert (fake guests)'
 & $cert {

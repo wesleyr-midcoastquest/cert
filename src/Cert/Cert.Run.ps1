@@ -640,6 +640,10 @@ function Start-CertRun {
         $run.engagement = New-CertEngagement -Config $Config -Lab $Lab -Run $run -Access ([string] $m.engagement.access)
         Save-CertRun -Config $Config -Run $run
         Add-CertRunEvent -Config $Config -Run $run -Event 'engagement' -Detail $(if ($run.engagement.account) { "$($run.engagement.account) ($($run.engagement.access))" } else { 'no account handed over' })
+        if ($run.engagement.account) {
+            $where = try { Set-CertEngagementNote -Lab $Lab -Run $run } catch { Write-Warning "Couldn't put the engagement account in MGMT's Proxmox Notes: $($_.Exception.Message)"; "not written: $($_.Exception.Message)" }
+            Add-CertRunEvent -Config $Config -Run $run -Event 'account in notes' -Detail $where
+        }
     } catch {
         Add-CertRunEvent -Config $Config -Run $run -Event 'setup failed' -Detail $_.Exception.Message
         throw "Run $($run.id) is open, but setting up after the snapshot failed: $($_.Exception.Message) Nothing has been broken. Revert the run (menu 9) to clean up."
@@ -828,6 +832,8 @@ function Restore-CertRun {
         $c = try { Clear-CertMgmtEngagement -Config $Config -Lab $Lab -Run $Run } catch { "couldn't clean up: $($_.Exception.Message)" }
         Add-CertRunEvent -Config $Config -Run $Run -Event 'MGMT cleaned up' -Detail $c
     }
+    $n = try { Clear-CertEngagementNote -Lab $Lab -Run $Run } catch { Write-Warning "Couldn't remove the engagement account from MGMT's Proxmox Notes: $($_.Exception.Message)"; "couldn't: $($_.Exception.Message)" }
+    if ($n) { Add-CertRunEvent -Config $Config -Run $Run -Event 'notes cleared' -Detail $n }
     $Run.state = 'Reverted'
     Add-CertRunEvent -Config $Config -Run $Run -Event 'reverted' -Detail "clocks set from MGMT"
     Remove-Item (Get-CertLockPath -Config $Config) -Force -ErrorAction SilentlyContinue
@@ -882,6 +888,32 @@ function Set-CertTargetLink {
     $vm = Assert-CertLabVm -Lab $Context.Lab -Instance $Instance
     Set-CertPveVmLink -Lab $Context.Lab -Vm $vm -Up $Up
     "$($Instance.name) network $(if ($Up) { 'connected' } else { 'disconnected' })"
+}
+
+function Set-CertEngagementNote {
+    # The engagement account and its password in MGMT's Proxmox Notes, so an
+    # admin who loses their session (a scenario may change their password) can
+    # still find them, with their Proxmox login. Removed by the revert.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] $Lab, [Parameter(Mandatory)] $Run)
+    $mgmt = Get-CertMgmtInstance -Lab $Lab
+    if (-not $mgmt) { throw 'no active MGMT in the ledger' }
+    $vm = Assert-CertLabVm -Lab $Lab -Instance $mgmt
+    $e = $Run.engagement
+    Add-CertPveVmNote -Lab $Lab -Vm $vm -RunId $Run.id -Lines @(
+        "Engagement account for this CERT run ($($e.access)):", '', '```', "Account:  $($e.account)", "UPN:      $($e.upn)", "Password: $($e.password)", '```')
+    "$($mgmt.name), Proxmox Notes"
+}
+
+function Clear-CertEngagementNote {
+    # Takes the run's block out of MGMT's Proxmox Notes. Returns what it did,
+    # or $null when there was nothing to remove.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] $Lab, [Parameter(Mandatory)] $Run)
+    $mgmt = Get-CertMgmtInstance -Lab $Lab
+    if (-not $mgmt) { return $null }
+    $vm = Assert-CertLabVm -Lab $Lab -Instance $mgmt
+    if (Remove-CertPveVmNote -Lab $Lab -Vm $vm -RunId $Run.id) { "removed from $($mgmt.name)'s Proxmox Notes" } else { $null }
 }
 
 function Invoke-CertModuleScript {

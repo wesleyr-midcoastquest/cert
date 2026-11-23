@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.8 (Nov 2026): the engagement account in MGMT's Notes
+
+- **The engagement account and its password also go in MGMT's Proxmox
+  Notes**, in a block marked with the run's name, and the revert takes the
+  block out again (the rest of the Notes stays as it was). Whoever loses
+  their session can find them with their Proxmox login. The timeline says
+  where (`account in notes`, `notes cleared`), never the password. Anyone
+  who can see MGMT in Proxmox can read them while the run is open.
+- **admin-passwords-changed 1.0.3 no longer resets the account running
+  CERT.** It reset every Tier 0 `-a` account, including the operator's own;
+  after a dropped connection the operator couldn't sign back in to MGMT, and
+  the run folder (readable only by that account) held the only copy of the
+  engagement password. The briefing puts that account out of scope.
+
 ## 0.2.7 (Nov 2026): admin-passwords-changed can run
 
 - **admin-passwords-changed 1.0.2.** Its break passed two lists as
