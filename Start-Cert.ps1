@@ -56,6 +56,32 @@ function Select-CertModule($Modules, [string] $Prompt = 'Module number') {
     $null
 }
 
+function Read-CertModuleOptions($Module, $Lab) {
+    # Asks for each of the module's prompted options (Enter takes the default
+    # shown), checks the answers together, shows the summary, and returns the
+    # options, or $null if the module's rules can't be met and the owner gives up.
+    $prompted = @($Module.Manifest.options | Where-Object { $_ -and $_.prompt -isnot [bool] })
+    $answers = @{}
+    foreach ($o in $prompted) { $answers[$o.name] = $o.default }
+    while ($true) {
+        foreach ($o in $prompted) {
+            while ($true) {
+                $shown = if ($null -eq $answers[$o.name]) { '' } elseif ($answers[$o.name] -is [bool]) { if ($answers[$o.name]) { 'yes' } else { 'no' } } else { $answers[$o.name] }
+                $in = (Read-Host "  $($o.prompt) [$shown]").Trim()
+                $raw = if ($in -eq '') { $answers[$o.name] } else { $in }
+                try { $answers[$o.name] = ConvertTo-CertOptionValue -Option $o -Value $raw; break }
+                catch { Write-Host "    $($_.Exception.Message); try again." -ForegroundColor Red }
+            }
+        }
+        $plan = Get-CertModulePlan -Module $Module -Options $answers -Lab $Lab
+        if (-not $plan.Errors.Count) { break }
+        foreach ($x in $plan.Errors) { Write-Host "  $x" -ForegroundColor Red }
+        if (-not (Confirm-Cert 'Change the settings?')) { return $null }
+    }
+    if ($plan.Summary) { Write-Host ''; foreach ($l in $plan.Summary) { Write-Host "  $l" } }
+    $answers
+}
+
 function Show-Handover($Config, $Lab, $Run, $Module) {
     Write-Host '── Tell the fixer ──────────────────────────────────────────' -ForegroundColor Cyan
     $b = Join-Path $Module.Path $Module.Manifest.engagement.briefing
@@ -116,6 +142,7 @@ function Invoke-RunMenu($Config, $Lab, $Run, $Modules) {
     $module = @($Modules | Where-Object { $_.Key -eq $Run.module.key })[0]
     if (-not $module) { Write-Warning "Module $($Run.module.key) is no longer in the catalog; only Revert and Report are available." }
     if ($Run.state -eq 'BreakFailed') { Write-Warning "The break failed (8 writes the report with the reason). Revert the run (9), then start it again." }
+    if ((Get-CertModuleKind $Run.module) -eq 'fixture') { return (Invoke-FixtureRunMenu $Config $Lab $Run $module) }
     Write-Host '  1. Show the handover (briefing, account)'
     Write-Host '  2. Start the clock (handed over to the fixer)'
     Write-Host '  3. Check the break took'
@@ -154,10 +181,44 @@ function Invoke-RunMenu($Config, $Lab, $Run, $Modules) {
     $null
 }
 
+function Invoke-FixtureRunMenu($Config, $Lab, $Run, $Module) {
+    # A fixture is built to be looked at: no clock, cause or repair.
+    Write-Host '  1. Show the handover (briefing, account)'
+    Write-Host '  3. Re-read (runs its checks again and rewrites what it wrote)'
+    Write-Host '  5. Add a note'
+    Write-Host '  7. Show the reference solution'
+    Write-Host '  8. Write the report'
+    Write-Host '  9. Revert the lab and end the run'
+    Write-Host '  R. Reload    Q. Quit (the run stays open)'
+    switch (Read-Choice 'Choice') {
+        '1' { if ($Run.state -eq 'BreakFailed') { Write-Warning 'Nothing to hand over: the build failed.' } elseif ($Module) { Show-Handover $Config $Lab $Run $Module } }
+        '3' {
+            if ($Module) {
+                $ok = Test-CertBreak -Config $Config -Lab $Lab -Run $Run -Module $Module
+                foreach ($x in @(@($Run.checks)[-1].results)) { Write-Host ('  {0,-10} {1,-24} {2}' -f $(if ($x.passed) { 'as planned' } else { 'WARNING' }), $x.id, $x.detail) }
+                Write-Host $(if ($ok) { 'Everything as planned.' } else { 'Some checks do not match (above).' })
+            }
+        }
+        '5' { $t = Read-Host 'Note'; if ($t) { $Run.notes = @($Run.notes) + "$((Get-Date).ToUniversalTime().ToString('HH:mm'))Z $t"; Add-CertRunNote -Config $Config -Run $Run -Text $t } }
+        '7' { if ($Module -and (Confirm-Cert 'Show the reference solution? (the answer key)')) { Get-Content (Join-Path $Module.Path $Module.Manifest.solution) | Write-Host } }
+        '8' { Write-Host "Report: $(Write-CertReport -Config $Config -Run $Run)" }
+        '9' {
+            $keep = -not (Confirm-Cert 'Also delete the snapshot set afterwards? (No keeps it, to run from the same point again)')
+            if (Confirm-Cert "Revert $(@($Run.set).Count) VM(s) to $($Run.snapshot.name)? Everything since the snapshot is lost") {
+                $null = Restore-CertRun -Config $Config -Lab $Lab -Run $Run -RemoveSnapshot:(-not $keep)
+                Write-Host "Reverted. Report: $(Write-CertReport -Config $Config -Run $Run)"
+            }
+        }
+        'r' { return 'reload' }
+        'q' { return 'quit' }
+    }
+    $null
+}
+
 function Invoke-MainMenu($Config, $Lab, $Modules) {
     Write-Host '  1. Update modules (check every source for new or changed modules)'
     Write-Host "  2. List modules ($(@($Modules | Where-Object Valid).Count) valid, $(@($Modules | Where-Object { -not $_.Valid }).Count) with problems)"
-    Write-Host '  3. Start a scenario'
+    Write-Host '  3. Start a scenario (or build a fixture)'
     Write-Host '  4. Start a surprise scenario (random module, details hidden)'
     Write-Host '  5. Snapshot test (snapshot and revert, nothing broken)'
     Write-Host '  6. Snapshot sets'
@@ -176,13 +237,23 @@ function Invoke-MainMenu($Config, $Lab, $Modules) {
             $m = Select-CertModule $Modules
             if ($m) {
                 Write-Host ''; Write-Host "$($m.Name): $($m.Summary)"
-                Write-Host "Destructive: $($m.Manifest.destructive). Fixer access: $($m.Manifest.engagement.access)."
-                if (Confirm-Cert 'Snapshot the lab and break it?') { $null = Start-CertRun -Config $Config -Lab $Lab -Module $m; return 'reload' }
+                $opts = @{}
+                if (@($m.Manifest.options | Where-Object { $_ }).Count) {
+                    $opts = Read-CertModuleOptions $m $Lab
+                    if ($null -eq $opts) { return $null }
+                }
+                if ($m.Kind -eq 'fixture') {
+                    Write-Host "Destructive: $($m.Manifest.destructive). Tool account: $($m.Manifest.engagement.access)."
+                    if (Confirm-Cert 'Snapshot the lab and build the fixture?') { $null = Start-CertRun -Config $Config -Lab $Lab -Module $m -Options $opts; return 'reload' }
+                } else {
+                    Write-Host "Destructive: $($m.Manifest.destructive). Fixer access: $($m.Manifest.engagement.access)."
+                    if (Confirm-Cert 'Snapshot the lab and break it?') { $null = Start-CertRun -Config $Config -Lab $Lab -Module $m -Options $opts; return 'reload' }
+                }
             }
         }
         '4' {
             $max = Read-Choice 'Highest difficulty (1-5, Enter: any)'
-            $pool = @($Modules | Where-Object { $_.Valid -and (-not ($max -match '^[1-5]$') -or $_.Difficulty -le [int] $max) })
+            $pool = @($Modules | Where-Object { $_.Valid -and $_.Kind -ne 'fixture' -and (-not ($max -match '^[1-5]$') -or $_.Difficulty -le [int] $max) })
             if (-not $pool) { Write-Warning 'No module fits.' }
             elseif (Confirm-Cert "Pick one of $($pool.Count) modules at random, snapshot the lab and break it?") {
                 $null = Start-CertRun -Config $Config -Lab $Lab -Module ($pool | Get-Random) -Blind; return 'reload'

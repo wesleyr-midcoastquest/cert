@@ -22,6 +22,8 @@ function Write-CertReport {
     [CmdletBinding()]
     param([Parameter(Mandatory)] $Config, [Parameter(Mandatory)] $Run, [switch] $IncludeSolution)
     $s = Get-CertRunSummary -Run $Run
+    # A fixture has no clock, cause or repair: its report shows what was read back.
+    $fixture = (Get-CertModuleKind $Run.module) -eq 'fixture'
     $L = [Collections.Generic.List[string]]::new()
     $L.Add("# CERT run $($Run.id): $($Run.module.name)")
     $L.Add('')
@@ -30,34 +32,54 @@ function Write-CertReport {
     $L.Add("| Module | ``$($Run.module.id)`` $($Run.module.version) ($($Run.module.source)$(if ($Run.module.commit) { ", $($Run.module.commit)" })) |")
     $L.Add("| Lab | $($Run.lab.site), $($Run.lab.release) (compatibility $($Run.lab.version)) |")
     $L.Add("| CERT | $($Run.cert) |")
-    $L.Add("| Mode | $(if ($Run.blind) { 'blind (the fixer was not told the scenario)' } else { 'open' }) |")
+    $L.Add("| Mode | $(if ($fixture) { 'fixture (built to be looked at; nothing to repair)' } elseif ($Run.blind) { 'blind (the fixer was not told the scenario)' } else { 'open' }) |")
     $L.Add("| Run by | $($Run.owner) |")
     $L.Add("| State | $($Run.state) |")
-    $L.Add("| Time to cause | $(if ($s.TimeToCause) { $s.TimeToCause } else { 'not recorded' }) |")
-    $L.Add("| Time to repair | $(if ($s.TimeToRepair) { $s.TimeToRepair } elseif ($s.HandedOver) { 'not repaired' } else { 'not handed over' }) |")
-    $L.Add("| Repair checks | $($s.CheckAttempts) |")
+    if ($Run.PSObject.Properties['options'] -and @($Run.options.PSObject.Properties).Count) { $L.Add("| Options | $(if ($Run.blind) { 'hidden (blind run)' } else { (Format-CertOptions $Run.options) -replace '\|', '/' }) |") }
+    if ($fixture) { $L.Add("| Read-backs | $($s.CheckAttempts) |") }
+    else {
+        $L.Add("| Time to cause | $(if ($s.TimeToCause) { $s.TimeToCause } else { 'not recorded' }) |")
+        $L.Add("| Time to repair | $(if ($s.TimeToRepair) { $s.TimeToRepair } elseif ($s.HandedOver) { 'not repaired' } else { 'not handed over' }) |")
+        $L.Add("| Repair checks | $($s.CheckAttempts) |")
+    }
     $L.Add('')
     $L.Add('## Lab')
     $L.Add('')
     $L.Add("Snapshot set ``$($Run.snapshot.name)``$(if ($Run.snapshot.ram) { ' (with RAM)' }): $(@($Run.set | ForEach-Object { "$($_.name) ($($_.role), $($_.vmid))" }) -join ', ').")
-    if ($Run.assessor) { $L.Add("The fixer worked on $($Run.assessor.name) ($($Run.assessor.address))$(if ($Run.assessor.is_mgmt) { ', the lab''s MGMT' }).") }
+    if ($Run.assessor) { $L.Add("The $(if ($fixture) { 'tool ran from' } else { 'fixer worked on' })  $($Run.assessor.name) ($($Run.assessor.address))$(if ($Run.assessor.is_mgmt) { ', the lab''s MGMT' }).") }
     if ($Run.engagement -and $Run.engagement.account) { $L.Add("Engagement account: ``$($Run.engagement.account)`` ($($Run.engagement.access)).") }
     $L.Add('')
     $L.Add('Targets: ' + (@($Run.targets.PSObject.Properties | ForEach-Object { "$($_.Name) = $(@($_.Value) -join ', ')" }) -join '; ') + '.')
     $L.Add('')
-    $L.Add('## Did the break take?')
-    $L.Add('')
-    foreach ($e in @($Run.expected)) { $L.Add("- $(if ($e.seen) { '[x]' } else { '[ ]' }) ``$($e.id)``$(if ($e.seen) { " on $(@($e.on) -join ', ')" } else { ' not seen' })") }
-    if (-not @($Run.expected).Count) { $L.Add('Not checked.') }
-    $L.Add('')
+    $last = @($Run.checks)[-1]
+    if ($fixture) {
+        $L.Add('## Fixture')
+        $L.Add('')
+        if ($last) {
+            $L.Add("Last read-back: $(([datetime]::Parse($last.at).ToUniversalTime()).ToString('yyyy-MM-dd HH:mm:ss')) UTC, $(if ($last.passed) { 'everything as planned' } else { 'some checks do not match (warnings)' }).")
+            $L.Add('')
+            $L.Add('| On | Check | Result | Detail |')
+            $L.Add('|---|---|---|---|')
+            foreach ($r in @($last.results)) { $L.Add("| $($r.on) | $($r.id) | $(if ($r.passed) { 'as planned' } else { 'warning' }) | $(([string] $r.detail) -replace '\|', '/') |") }
+        } else { $L.Add('Not read back yet.') }
+        $dir = Join-Path (Get-CertRunsPath -Config $Config) $Run.id
+        $files = @(Get-ChildItem -Path $dir -File -ErrorAction SilentlyContinue | Where-Object Name -notin 'run.json', 'report.md', 'module-state.json' | Sort-Object Name)
+        if ($files) { $L.Add(''); $L.Add('Written by the module, in the run folder:'); foreach ($f in $files) { $L.Add("- ``$($f.FullName)``") } }
+        $L.Add('')
+    } else {
+        $L.Add('## Did the break take?')
+        $L.Add('')
+        foreach ($e in @($Run.expected)) { $L.Add("- $(if ($e.seen) { '[x]' } else { '[ ]' }) ``$($e.id)``$(if ($e.seen) { " on $(@($e.on) -join ', ')" } else { ' not seen' })") }
+        if (-not @($Run.expected).Count) { $L.Add('Not checked.') }
+        $L.Add('')
+    }
     $L.Add('## Timeline (UTC)')
     $L.Add('')
     foreach ($e in @($Run.timeline)) {
         $t = ([datetime]::Parse($e.at).ToUniversalTime()).ToString('yyyy-MM-dd HH:mm:ss')
         $L.Add("- $t **$($e.event)**$(if ($e.detail) { ': ' + $e.detail })")
     }
-    $last = @($Run.checks)[-1]
-    if ($last) {
+    if ($last -and -not $fixture) {
         $L.Add('')
         $L.Add("## Last repair check ($(if ($last.passed) { 'passed' } else { 'failed' }))")
         $L.Add('')

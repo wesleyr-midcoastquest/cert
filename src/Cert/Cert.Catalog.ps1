@@ -92,14 +92,23 @@ function Test-CertManifest {
     foreach ($f in @($m.break, $m.verify) | Where-Object { $_ }) { if ($f -notmatch '\.ps1$') { $e.Add("'$f' must be a .ps1 script") } }
 
     $ids = @($m.expected_failures | Where-Object { $_ })
-    if ($ids.Count -eq 0 -and -not $m.verify) { $e.Add('expected_failures or verify: a break has to be visible to at least one of them') }
+    $kind = Get-CertModuleKind $m
+    if ($kind -notin $script:Kinds) { $e.Add("kind '$kind': one of $($script:Kinds -join ', ')") }
+    elseif ($kind -eq 'fixture') {
+        # A fixture is looked at, not repaired: its verify reads it back.
+        if (-not $m.verify) { $e.Add('a fixture needs verify: it reads back what was built') }
+        if ($ids.Count) { $e.Add('a fixture has no expected_failures: nothing is broken') }
+    }
+    elseif ($ids.Count -eq 0 -and -not $m.verify) { $e.Add('expected_failures or verify: a break has to be visible to at least one of them') }
+    foreach ($x in Test-CertOptionManifest -Manifest $m -Folder $Folder) { $e.Add($x) }
     foreach ($id in $ids) {
         if ($id -notmatch '^[A-Z]+-\d{3}$') { $e.Add("expected_failures '$id': a validation ID like REPL-001") }
         elseif ($Catalog -and $Catalog -notcontains $id) { $e.Add("expected_failures '$id' isn't in the lab's validation catalog") }
     }
 
     # Scripts must parse (PowerShell 7 parser; guest script blocks inside are 5.1 code).
-    foreach ($f in @($m.break, $m.verify) | Where-Object { $_ }) {
+    $check = if ($m.PSObject.Properties['options_check']) { $m.options_check } else { $null }
+    foreach ($f in @($m.break, $m.verify, $check) | Where-Object { $_ -and $_ -notmatch '[\\/]|\.\.' }) {
         $p = Join-Path $Folder $f
         if (Test-Path $p) {
             $tokens = $null; $errs = $null
@@ -167,6 +176,7 @@ function Get-CertModules {
                 Summary    = if ($m) { [string] $m.summary } else { '' }
                 Category   = if ($m) { [string] $m.category } else { '' }
                 Difficulty = if ($m) { [int] $m.difficulty } else { 0 }
+                Kind       = Get-CertModuleKind $m
                 Source     = $src.Name
                 Path       = $dir.FullName
                 Commit     = $commit

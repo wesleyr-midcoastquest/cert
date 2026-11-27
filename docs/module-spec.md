@@ -10,7 +10,13 @@ modules/<id>/
   verify.ps1      optional: is it really fixed? (runs on MGMT, PowerShell 7)
   briefing.md     what the impacted owner tells the fixer
   solution.md     what was done, what a fixer should find, a reference fix
+  options.ps1     optional: checks the module's options together (runs on MGMT, no lab access)
 ```
+
+Most modules are **scenarios**: they break something for a fixer to repair.
+A **fixture** (`kind: fixture`) builds something for someone to look at
+instead, such as accounts a reporting tool should describe correctly; see
+[Fixtures](#fixtures).
 
 Check it with `./tools/Test-CertModule.ps1 -Path modules/<id> -LabRoot <midcoast-labs clone>`.
 CI runs the same check on every pull request.
@@ -23,6 +29,7 @@ version: 1.0.0                  # x.y.z; raise it with every change (Update show
 name: GPO deleted               # a title
 summary: The DCs' LAPS/DSRM policy was deleted; a recent GPO backup exists on the PDC   # one menu line, 100 characters at most
 category: GroupPolicy           # ActiveDirectory | DNS | GroupPolicy | Replication | Time | Identity | Other
+kind: scenario                  # optional: scenario (the default) or fixture
 difficulty: 2                   # 1 (routine) to 5 (hard); surprise mode can cap it
 destructive: false              # true if it switches machines off or removes directory objects
 authors: [Your Name]
@@ -49,6 +56,15 @@ expected_failures: [LAPS-002]   # lab validation IDs the break should trip
 break: break.ps1
 verify: verify.ps1              # optional, but a module needs expected_failures, verify, or both
 solution: solution.md
+
+options:                        # optional: settings asked for before the snapshot
+  - name: total                 # lower case, digits, underscores
+    prompt: Total users (1-5000)   # the question; false for a parameter-only option
+    type: int                   # int | bool | string
+    default: 50                 # Enter takes it; leave out for "not set" ($null)
+    min: 1                      # int only
+    max: 5000
+options_check: options.ps1      # optional: rules across options, and the summary
 ```
 
 **Selectors.**
@@ -84,6 +100,7 @@ Both get one parameter, `$Context`:
 | `Assessor` | where the fixer works: `.Name`, `.Address`, `.Instance`, `.IsMgmt` |
 | `Config` | CERT's settings |
 | `ModulePath` | your module's folder |
+| `Options` | the module's options, name → value (an ordered hashtable; empty without options) |
 
 Helpers:
 
@@ -139,6 +156,56 @@ Check the **outcome**, not the method: "every FSMO role is on a live DC", not
    and run on every site.
 7. **Be idempotent where you can.** An owner may run the same module from the
    same snapshot many times.
+
+## Options
+
+A module that needs settings lists them under `options:`. The menu asks for
+each one with `prompt`, shows the default (Enter takes it), and asks again
+for anything that isn't valid (not a number, out of range). Then it runs
+`options_check`, and asks again if that returns errors. It prints the
+summary, and only then asks "Snapshot the lab ...?", so nothing changes
+before the owner has seen it. Options with `prompt: false` aren't asked for
+and keep their default unless given from a script.
+
+From a script, `Start-CertRun -Config $c -Lab $l -Module $m -Options @{ total = 200; seed = 7 }`.
+Options left out take their default. Invalid ones (or a name the module
+doesn't have) stop the run before the snapshot. A surprise run uses the
+defaults. The options are kept in the run record and the report, and reach
+`break.ps1` and `verify.ps1` as `$Context.Options`.
+
+`Get-CertModulePlan -Module $m -Options @{...} [-Lab $l]` returns the options
+with defaults filled in, any errors, and the summary, without touching the
+lab: it's the module's `-WhatIf`.
+
+**options.ps1** (`options_check`) runs on MGMT, in PowerShell 7, with no lab
+access. It gets `-Options` (every option, defaults filled in, each already
+typed and range-checked) and `-Inventory` (the lab's resolved inventory, or
+`$null` when there's no lab). It returns
+`@{ Errors = @(<text>, ...); Summary = @(<line>, ...) }`: errors for rules
+that span several options, and the lines shown before the snapshot.
+
+## Fixtures
+
+`kind: fixture` is for a module that builds something to be looked at, not
+repaired: say, accounts in known states, to check what a reporting tool says
+about them. CERT runs it like a scenario, with pre-flight, snapshot,
+engagement account and revert, with these differences:
+
+- It must have `verify` and can't have `expected_failures`. Its
+  `verify.ps1` **reads back** what was built and should pass. CERT runs it
+  after the build ("fixture checked" in the timeline), and again whenever
+  the owner chooses *Re-read*. A failed check is a warning that the fixture
+  isn't quite as planned; use `-Severity Medium` and say what differs. Every
+  read-back's results are kept, and the report shows the last.
+- The run's state after the build is `Built`. There's no clock, cause or
+  repair: the run menu offers the handover, Re-read, a note, the solution,
+  the report and the revert. `Test-CertRepair` and `Start-CertClock` refuse
+  a fixture.
+- A fixture can't run blind, and surprise runs never pick one.
+- `solution.md` is the answer key: what was built and how to see it.
+- Files the module writes to the run folder (`Get-CertRunsPath`, then the run
+  id) are listed in the report. Like everything there, they're readable only
+  by the account running CERT. No secrets in them (rule 5).
 
 ## briefing.md and solution.md
 
