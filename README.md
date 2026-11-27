@@ -1,6 +1,6 @@
 # CERT
 
-Break/fix scenarios for a [MidCoast Lab](https://github.com/wesleyr-midcoastquest/midcoast-labs).
+Break/fix scenarios for a [MidCoast Lab](https://github.com/MidCoast-Labs/midcoast-labs).
 
 CERT breaks a working lab in one specific way, such as losing the FSMO role
 holder, deleting the DNS locator records, skewing a DC's clock or changing
@@ -112,7 +112,7 @@ hides which one, even from the person running CERT, until the end.
 ## Installing on MGMT
 
 For a tested version, use the **latest release**: it's at the top of
-[Releases](https://github.com/wesleyr-midcoastquest/cert/releases/latest), and
+[Releases](https://github.com/MidCoast-Labs/cert/releases/latest), and
 each release is a tag (`v<version>`, the version CERT's menu shows). `master`
 can be ahead of it. The clone below gets `master`. To install a release
 instead, add `--branch v<version>` to `git clone`. Note that **Update modules**
@@ -122,7 +122,7 @@ take a later release with `git fetch --tags` and `git checkout v<version>`.
 As your admin account (`<you>-a`), in PowerShell 7:
 
 ```powershell
-git clone https://github.com/wesleyr-midcoastquest/cert.git C:\MidCoastLab\cert
+git clone https://github.com/MidCoast-Labs/cert.git C:\MidCoastLab\cert
 cd C:\MidCoastLab\cert
 Get-ChildItem -Recurse | Unblock-File
 ./tools/Test-CertModule.ps1 -LabRoot C:\MidCoastLab\repo     # every module should say OK

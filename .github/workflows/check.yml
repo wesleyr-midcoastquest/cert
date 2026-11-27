@@ -13,7 +13,7 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          repository: wesleyr-midcoastquest/midcoast-labs
+          repository: MidCoast-Labs/midcoast-labs
           path: midcoast-labs
 
       - name: Install powershell-yaml

@@ -5,7 +5,7 @@
 # one: a deleted VM can't be rolled back.
 
 $script:SnapshotPrefix = 'CERT'
-$script:SnapshotRightsIssue = 'https://github.com/wesleyr-midcoastquest/midcoast-labs/issues/23'
+$script:SnapshotRightsIssue = 'https://github.com/MidCoast-Labs/midcoast-labs/issues/23'
 
 function Get-CertPveToken {
     [CmdletBinding()]

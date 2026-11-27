@@ -171,7 +171,7 @@ added by hand (README).
 
 Written for MidCoast Lab compatibility 1.5 (LAB-261105-04). Needs snapshot
 rights on the lab's Proxmox role
-([midcoast-labs#23](https://github.com/wesleyr-midcoastquest/midcoast-labs/issues/23));
+([midcoast-labs#23](https://github.com/MidCoast-Labs/midcoast-labs/issues/23));
 the README has the one-line fix until the lab ships it.
 
 - Control panel (`Start-Cert.ps1`): update modules from this repo and extra
