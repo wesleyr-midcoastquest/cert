@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.1 (Nov 2026): password-pool can finish its build
+
+- **password-pool 1.0.1**
+  ([cert#1](https://github.com/MidCoast-Labs/cert/issues/1)). The build
+  stopped at the first bad-password bind with `The following exception
+  occurred while retrieving member "Dispose": "The user name or password is
+  incorrect."`, so it could never lock an account. Windows PowerShell's ADSI
+  adapter binds again for any member called on a `DirectoryEntry`,
+  `Dispose()` included, and with a wrong password that second bind threw
+  from the `finally` block. Binds now use `LdapConnection`, which returns
+  the result instead of throwing again. A planned logon that fails is a
+  warning with the DC's reason (`data 52e`, `773`, `532`, ...), and an
+  account that misbehaves while being locked out is a warning, not a failed
+  build.
+- Revert a run that failed this way before trying again: the pool objects
+  it made are still there until the revert.
+
 ## 0.3.0 (Nov 2026): module options, fixtures, and password-pool
 
 - **Modules can ask for options** (`options:` in `module.yaml`). The menu
