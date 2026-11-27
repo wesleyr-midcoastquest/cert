@@ -204,6 +204,17 @@ that run can't be reverted: check with the lab owner first.
 | `admin-passwords-changed` | Every Tier 0 admin password is reset by an "intruder", who leaves a domain admin behind | break-glass domain admin | 3 |
 | `gpo-deleted` | The DCs' LAPS/DSRM GPO is deleted; last night's GPO backup is on the PDC | domain admin | 2 |
 
+**Fixtures** build something to look at instead of breaking anything
+(`kind: fixture`, [docs/module-spec.md](docs/module-spec.md#fixtures)):
+
+| Fixture | What it builds | Tool account | Difficulty |
+|---|---|---|---|
+| `password-pool` | AD users in known states (locked out, expired, must change at next logon, normal with varied expiry; optionally never-expires and cannot-change), with an answer-key CSV, to check what a reporting tool says | domain admin | 1 |
+
+Before the snapshot, CERT asks for the module's options (for
+`password-pool`: how many users, and the share locked out, expired and
+must-change), checks them and shows what it will build.
+
 Each has a `briefing.md` (what the owner tells the fixer) and a `solution.md`
 (what was done, what a fixer should find, a reference fix). Writing your own:
 [docs/module-spec.md](docs/module-spec.md). Contributing:
@@ -220,7 +231,7 @@ trust, and read what changed before you take an update.
 Start-Cert.ps1             the control panel
 cert.config.example.yaml   settings and their defaults (copy to cert.config.yaml to change)
 src/Cert/                  the CERT module: lab, Proxmox, guests, catalog, runs, reports
-modules/<id>/              scenario modules: module.yaml, break.ps1, verify.ps1, briefing.md, solution.md
+modules/<id>/              modules: module.yaml, break.ps1, verify.ps1, briefing.md, solution.md (and options.ps1)
 tools/Test-CertModule.ps1  checks modules (for contributors and CI)
 tools/cert-snapshots.sh    list/remove CERT snapshot sets on the Proxmox host
 tests/Run-Tests.ps1        offline tests (fake Proxmox, no guests)

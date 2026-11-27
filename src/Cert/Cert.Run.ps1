@@ -1,6 +1,7 @@
 # Cert.Run: one scenario run, from snapshot to revert.
 #
 #   Prepared -> Snapshotted -> Broken -> InProgress -> (Repaired) -> Reverted
+#   (a fixture: Prepared -> Snapshotted -> Built -> Reverted)
 #
 # A run's record lives in runs_path/<run id>/run.json; the run id is the
 # snapshot set's name (CERT-<YYMMDD>-<HHMM>-<NN>). While a run is open, the lock
@@ -651,12 +652,18 @@ function Start-CertRun {
     # Pre-flight, snapshot, assessor access, engagement account, break, and the
     # first check that the break took. Returns the run record. Anything that
     # fails after the snapshot leaves the run open so you can revert it.
+    # -Options: the module's options (docs/module-spec.md); any left out take
+    # their defaults, and invalid ones stop the run before the snapshot.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] $Config, [Parameter(Mandatory)] $Lab, [Parameter(Mandatory)] $Module,
-        [switch] $Blind, [switch] $Force
+        [switch] $Blind, [switch] $Force, [hashtable] $Options = @{}
     )
     $m = $Module.Manifest
+    $kind = Get-CertModuleKind $m
+    if ($Blind -and $kind -eq 'fixture') { throw "$($m.id) is a fixture: it builds something to look at, so a blind run makes no sense." }
+    $plan = Get-CertModulePlan -Module $Module -Options $Options -Lab $Lab
+    if ($plan.Errors.Count) { throw "$($m.id): the options aren't valid, so nothing was done:`n  - $($plan.Errors -join "`n  - ")" }
     Write-Host "Pre-flight for $($m.id) $($m.version)..."
     $pf = Test-CertPreflight -Config $Config -Lab $Lab -Module $Module
     foreach ($w in $pf.Warnings) { Write-Warning $w }
@@ -673,7 +680,8 @@ function Start-CertRun {
         owner       = $env:USERNAME
         created_utc = (Get-Date).ToUniversalTime().ToString('o')
         updated_utc = $null
-        module      = [pscustomobject]@{ key = $Module.Key; id = $m.id; version = $m.version; name = $m.name; source = $Module.Source; commit = $Module.Commit; path = $Module.Path }
+        module      = [pscustomobject]@{ key = $Module.Key; id = $m.id; version = $m.version; name = $m.name; source = $Module.Source; commit = $Module.Commit; path = $Module.Path; kind = $kind }
+        options     = [pscustomobject] $plan.Options
         lab         = [pscustomobject]@{ site = $Lab.Site; release = $Lab.Release; version = $Lab.Version; ledger_hash = $Lab.LedgerHash }
         set         = @($pf.Vms | ForEach-Object { [pscustomobject]@{ name = $_.Instance.name; role = $_.Instance.role; vmid = $_.Vm.VmId; node = $_.Vm.Node } })
         targets     = [pscustomobject] @{}
@@ -691,6 +699,7 @@ function Start-CertRun {
     Save-CertRun -Config $Config -Run $run
     Write-CertLock -Config $Config -Run $run
     Add-CertRunEvent -Config $Config -Run $run -Event 'prepared' -Detail "$($m.id) $($m.version) against $($run.set.name -join ', ')"
+    if ($plan.Options.Count) { Add-CertRunEvent -Config $Config -Run $run -Event 'options' -Detail $(if ($Blind) { 'details hidden (blind run)' } else { Format-CertOptions $plan.Options }) }
 
     Write-Host "Snapshot set $name..."
     try { New-CertSnapshotSet -Config $Config -Lab $Lab -Vms $pf.Vms -Name $name -Purpose "Run $name, module $($m.id) $($m.version)." }
@@ -751,12 +760,12 @@ function Start-CertRun {
         return $run
     }
 
-    Write-Host 'Breaking...'
-    $ctx = [pscustomobject]@{ Lab = $Lab; Config = $Config; Run = $run; Targets = $targets; Assessor = $assessor; ModulePath = $Module.Path; ConnectTimeoutSeconds = 300 }
+    Write-Host $(if ($kind -eq 'fixture') { 'Building...' } else { 'Breaking...' })
+    $ctx = [pscustomobject]@{ Lab = $Lab; Config = $Config; Run = $run; Targets = $targets; Assessor = $assessor; ModulePath = $Module.Path; ConnectTimeoutSeconds = 300; Options = $plan.Options }
     try {
         $out = Invoke-CertModuleScript -Path (Join-Path $Module.Path $m.break) -Context $ctx
-        $run.state = 'Broken'
-        Add-CertRunEvent -Config $Config -Run $run -Event 'broken' -Detail $(if ($Blind) { 'details hidden (blind run)' } else { (@($out) | ForEach-Object { "$_" }) -join '; ' })
+        $run.state = if ($kind -eq 'fixture') { 'Built' } else { 'Broken' }
+        Add-CertRunEvent -Config $Config -Run $run -Event $(if ($kind -eq 'fixture') { 'built' } else { 'broken' }) -Detail $(if ($Blind) { 'details hidden (blind run)' } else { (@($out) | ForEach-Object { "$_" }) -join '; ' })
     } catch {
         $run.state = 'BreakFailed'
         Add-CertRunEvent -Config $Config -Run $run -Event 'break failed' -Detail $_.Exception.Message
@@ -765,7 +774,7 @@ function Start-CertRun {
     }
 
     $settle = if ($m.settle_seconds) { [int] $m.settle_seconds } else { 60 }
-    Write-Host "Waiting $settle s for the break to show, then checking it took..."
+    Write-Host $(if ($kind -eq 'fixture') { "Waiting $settle s, then reading it back..." } else { "Waiting $settle s for the break to show, then checking it took..." })
     Start-Sleep -Seconds $settle
     Test-CertBreak -Config $Config -Lab $Lab -Run $run -Module $Module | Out-Null
     $run
@@ -792,7 +801,8 @@ function Invoke-CertVerify {
         $multi = @($m.targets | Where-Object { $_.name -eq $p.Name -and $_.select -eq 'all-dcs' }).Count -gt 0
         $targets[$p.Name] = if ($multi) { , $inst } else { $inst[0] }
     }
-    $ctx = [pscustomobject]@{ Lab = $Lab; Config = $Config; Run = $Run; Targets = $targets; Assessor = (Get-CertAssessor -Config $Config -Lab $Lab); ModulePath = $Module.Path }
+    $opts = if ($Run.PSObject.Properties['options']) { ConvertTo-CertOptionTable $Run.options } else { [ordered]@{} }
+    $ctx = [pscustomobject]@{ Lab = $Lab; Config = $Config; Run = $Run; Targets = $targets; Assessor = (Get-CertAssessor -Config $Config -Lab $Lab); ModulePath = $Module.Path; Options = $opts }
     try {
         @(Invoke-CertModuleScript -Path (Join-Path $Module.Path $m.verify) -Context $ctx) | Where-Object { $_ } | ForEach-Object {
             $sev = if ($_.Passed) { 'Pass' } elseif ($_.Severity) { [string] $_.Severity } else { 'Critical' }
@@ -816,6 +826,9 @@ function Test-CertBreak {
     # Did the break show up as the module said it would? Each expected lab
     # validation failure is looked for, and the module's own verify.ps1 should
     # now fail at least one blocking check. Returns $true when both hold.
+    # A fixture is the other way round: its verify.ps1 reads back what was
+    # built and should pass. Each check that doesn't is a warning, and the
+    # results are kept in the run's checks (the report shows the last ones).
     [CmdletBinding()]
     param([Parameter(Mandatory)] $Config, [Parameter(Mandatory)] $Lab, [Parameter(Mandatory)] $Run, [Parameter(Mandatory)] $Module)
     if ($Run.state -eq 'BreakFailed') {
@@ -823,6 +836,16 @@ function Test-CertBreak {
         return $false
     }
     $m = $Module.Manifest
+    if ((Get-CertModuleKind $m) -eq 'fixture') {
+        Write-Host "  reading the fixture back..."
+        $vr = @(Invoke-CertVerify -Config $Config -Lab $Lab -Run $Run -Module $Module)
+        $bad = @($vr | Where-Object { -not $_.passed })
+        foreach ($x in $bad) { Write-Warning "$($x.id)$(if ($x.on) { " on $($x.on)" }): $($x.detail)" }
+        $Run.checks = @($Run.checks) + [pscustomobject]@{ at = (Get-Date).ToUniversalTime().ToString('o'); passed = ($bad.Count -eq 0); results = $vr }
+        $detail = if (-not $vr.Count) { 'verify.ps1 returned no checks' } elseif ($bad.Count) { "$($bad.Count) of $($vr.Count) check(s) don't match: $(@($bad | Select-Object -First 6 | ForEach-Object id) -join ', ')" } else { "all $($vr.Count) check(s) match" }
+        Add-CertRunEvent -Config $Config -Run $Run -Event 'fixture checked' -Detail $detail
+        return ($vr.Count -gt 0 -and $bad.Count -eq 0)
+    }
     $seen = @{}
     if (@($m.expected_failures | Where-Object { $_ }).Count) {
         foreach ($i in Get-CertValidationSet -Lab $Lab -Run $Run -Manifest $m) {
@@ -855,6 +878,7 @@ function Start-CertClock {
     # The impacted owner has handed over to the fixer.
     [CmdletBinding()]
     param([Parameter(Mandatory)] $Config, [Parameter(Mandatory)] $Run, [string] $Fixer)
+    if ((Get-CertModuleKind $Run.module) -eq 'fixture') { throw "Run $($Run.id) is a fixture: there's no clock to start." }
     if ($Run.state -notin 'Broken', 'InProgress') { throw "Run $($Run.id) is $($Run.state); the clock starts after the break." }
     $Run.state = 'InProgress'
     Add-CertRunEvent -Config $Config -Run $Run -Event 'handed over' -Detail $(if ($Fixer) { "to $Fixer" } else { $null })
@@ -875,6 +899,7 @@ function Test-CertRepair {
     [CmdletBinding()]
     param([Parameter(Mandatory)] $Config, [Parameter(Mandatory)] $Lab, [Parameter(Mandatory)] $Run, [Parameter(Mandatory)] $Module)
     $m = $Module.Manifest
+    if ((Get-CertModuleKind $m) -eq 'fixture') { throw "$($m.id) is a fixture: nothing was broken, so there's no repair to check. Re-read it instead (menu 3)." }
     $results = @()
     foreach ($i in Get-CertValidationSet -Lab $Lab -Run $Run -Manifest $m) {
         $rep = Invoke-CertLabValidationShown -Lab $Lab -Instance $i

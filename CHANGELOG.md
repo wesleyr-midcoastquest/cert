@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.0 (Nov 2026): module options, fixtures, and password-pool
+
+- **Modules can ask for options** (`options:` in `module.yaml`). The menu
+  asks for each before the snapshot, with its default (Enter takes it),
+  asks again for anything invalid, runs the module's `options_check` for
+  rules across options, and shows its summary before "Snapshot the lab
+  ...?". Scripts pass them as `Start-CertRun -Options @{...}`; invalid
+  options stop the run before anything changes. `Get-CertModulePlan` shows
+  what a module would do without touching the lab. Modules get them as
+  `$Context.Options`; the run record and the report keep them.
+- **Fixtures** (`kind: fixture`): modules that build something to look at,
+  not repair. Their `verify.ps1` reads it back and should pass; a mismatch
+  is a warning. The run menu has no clock, cause or repair, just a
+  *Re-read*. The report shows the last read-back instead of times and
+  repair checks. Fixtures never run blind and surprise runs skip them.
+- **New fixture `password-pool` 1.0.0**
+  ([cert#1](https://github.com/MidCoast-Labs/cert/issues/1)):
+  a pool of AD users in known password and lockout states, for checking
+  what a reporting tool says. Lockout and expiry come from pool PSOs applied
+  through pool groups; the Default Domain Policy isn't touched. Every
+  read-back writes `password-pool.csv`, the answer key, to the run folder.
+- Existing modules are unchanged: scenarios with no options.
+
 ## 0.2.10 (Nov 2026): fixes for fsmo-holder-lost runs
 
 - **The engagement account is on every DC before anything is broken.** CERT

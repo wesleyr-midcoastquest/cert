@@ -1,0 +1,77 @@
+id: password-pool
+version: 1.0.0
+name: Password pool
+summary: A pool of AD users in known password and lockout states, to check what a reporting tool says
+kind: fixture
+category: Identity
+difficulty: 1
+destructive: false
+authors:
+  - Wesley Reynolds
+tags: [fixture, passwords, lockout, fine-grained-password-policy, reporting]
+
+requires:
+  cert: ">=0.3"
+  lab: ">=1.5"
+  roles:
+    DC: 1
+  assessor: true
+
+targets:
+  - name: dc
+    select: pdc
+
+engagement:
+  access: domain-admin       # the reporting tool runs as a domain admin
+  briefing: briefing.md
+
+# The build waits out a short expired-tier age itself.
+settle_seconds: 30
+
+options:
+  - name: total
+    prompt: Total users (1-5000)
+    type: int
+    default: 50
+    min: 1
+    max: 5000
+  - name: locked_percent
+    prompt: "% locked out (any password state)"
+    type: int
+    default: 10
+    min: 0
+    max: 100
+  - name: expired_percent
+    prompt: "% expired (password past its maximum age)"
+    type: int
+    default: 15
+    min: 0
+    max: 100
+  - name: must_change_percent
+    prompt: "% change at next logon"
+    type: int
+    default: 15
+    min: 0
+    max: 100
+  - name: never_expires_percent
+    prompt: false
+    type: int
+    default: 0
+    min: 0
+    max: 100
+  - name: cannot_change_percent
+    prompt: false
+    type: int
+    default: 0
+    min: 0
+    max: 100
+  - name: seed
+    prompt: false
+    type: int
+    min: 0
+    max: 2147483647
+options_check: options.ps1
+
+break: break.ps1
+verify: verify.ps1
+solution: solution.md

@@ -125,7 +125,7 @@ Assert-Throws 'only >= is supported' { Test-CertRequirement '~1.5' '1.5' } '*Uns
 
 Write-Host 'Modules'
 $mods = @(Get-CertModules -Config $config -LabRoot $lab)
-Assert 'six built-in modules, all valid' { $mods.Count -eq 6 -and @($mods | Where-Object { -not $_.Valid }).Count -eq 0 }
+Assert 'seven built-in modules, all valid' { $mods.Count -eq 7 -and @($mods | Where-Object { -not $_.Valid }).Count -eq 0 }
 $bad = Join-Path $tmp 'bad/Bad_Module'
 New-Item -ItemType Directory -Path $bad -Force | Out-Null
 @'
@@ -164,6 +164,77 @@ Invoke-CertTarget -Context $Context -Instance $x -ArgumentList $names, $more -Sc
 '@
 $nested = @(Test-CertManifest -Manifest (Read-CertYaml (Join-Path $broken 'module.yaml')) -Folder $broken | Where-Object { $_ -like '*array inside an array*' })
 Assert 'one of several arguments wrapped as (, $x) is a problem; a lone one is not' { $nested.Count -eq 2 -and @($nested -like 'break.ps1: line 2:*').Count -eq 2 }
+
+Write-Host 'Options and fixtures'
+Assert 'existing modules are scenarios with no options' { @($mods | Where-Object { $_.Id -ne 'password-pool' -and ($_.Kind -ne 'scenario' -or @($_.Manifest.options | Where-Object { $_ }).Count) }).Count -eq 0 }
+$gpo = @($mods | Where-Object Id -eq 'gpo-deleted')[0]
+$gp = Get-CertModulePlan -Module $gpo
+Assert 'a module without options: an empty plan, no errors' { $gp.Options.Count -eq 0 -and $gp.Errors.Count -eq 0 -and $gp.Summary.Count -eq 0 }
+Assert 'an option a module does not have is refused' { @((Get-CertModulePlan -Module $gpo -Options @{ total = 5 }).Errors -like "*has no option 'total'*").Count -eq 1 }
+$intOpt = [pscustomobject]@{ name = 'total'; type = 'int'; min = 1; max = 5000 }
+Assert 'int option: text is converted' { (ConvertTo-CertOptionValue -Option $intOpt -Value ' 42 ') -eq 42 }
+Assert-Throws 'int option: not a number' { ConvertTo-CertOptionValue -Option $intOpt -Value 'lots' } '*whole number*'
+Assert-Throws 'int option: out of range' { ConvertTo-CertOptionValue -Option $intOpt -Value 5001 } '*1 to 5000*'
+Assert 'bool option: yes/no' { (ConvertTo-CertOptionValue -Option ([pscustomobject]@{ name = 'b'; type = 'bool' }) -Value 'Yes') -eq $true -and (ConvertTo-CertOptionValue -Option ([pscustomobject]@{ name = 'b'; type = 'bool' }) -Value 'n') -eq $false }
+Assert 'empty input means not set' { $null -eq (ConvertTo-CertOptionValue -Option $intOpt -Value '') }
+$optMod = Join-Path $tmp 'opts/opt-module'
+New-Item -ItemType Directory -Path $optMod -Force | Out-Null
+Copy-Item (Join-Path $certRoot 'modules/gpo-deleted/*') $optMod
+$y = (Get-Content (Join-Path $optMod 'module.yaml') -Raw).Replace('id: gpo-deleted', 'id: opt-module')
+Set-Content (Join-Path $optMod 'module.yaml') ($y + @'
+
+options:
+  - { name: Bad-Name, prompt: x, type: int }
+  - { name: count, prompt: How many, type: int, default: 9, min: 1, max: 5 }
+  - { name: count, prompt: again, type: int }
+  - { name: colour, prompt: true, type: text }
+  - { name: flag, prompt: '', type: bool, min: 1 }
+options_check: missing.ps1
+'@)
+$op = @(Test-CertManifest -Manifest (Read-CertYaml (Join-Path $optMod 'module.yaml')) -Folder $optMod)
+foreach ($want in "option name 'Bad-Name'", "option 'count' default: count must be 1 to 5", "option 'count' is listed twice", "option 'colour' type 'text'", "option 'flag' prompt", "option 'flag' min: only for type int", "options_check file 'missing.ps1' is missing") {
+    Assert "rejects: $want" { @($op | Where-Object { $_ -like "*$want*" }).Count -gt 0 }.GetNewClosure()
+}
+$fixMod = Join-Path $tmp 'fix/fix-module'
+New-Item -ItemType Directory -Path $fixMod -Force | Out-Null
+Copy-Item (Join-Path $certRoot 'modules/gpo-deleted/*') $fixMod
+$fy = (Get-Content (Join-Path $fixMod 'module.yaml') -Raw).Replace('id: gpo-deleted', 'id: fix-module') -replace '(?m)^verify:.*$', ''
+Set-Content (Join-Path $fixMod 'module.yaml') ("kind: fixture`n" + $fy)
+$fp = @(Test-CertManifest -Manifest (Read-CertYaml (Join-Path $fixMod 'module.yaml')) -Folder $fixMod -Catalog (Get-CertLabCatalogIds -LabRoot $lab))
+Assert 'a fixture without verify is refused' { @($fp -like '*a fixture needs verify*').Count -eq 1 }
+Assert 'a fixture with expected_failures is refused' { @($fp -like '*a fixture has no expected_failures*').Count -eq 1 }
+Set-Content (Join-Path $fixMod 'module.yaml') ("kind: puzzle`n" + $fy)
+Assert 'an unknown kind is refused' { @(Test-CertManifest -Manifest (Read-CertYaml (Join-Path $fixMod 'module.yaml')) -Folder $fixMod) -like "*kind 'puzzle'*" }
+Set-Content (Join-Path $fixMod 'module.yaml') ($fy -replace '(?m)^expected_failures:\s*\n(\s+-.*\n)+', "expected_failures: []`n")
+Assert 'scenario rule unchanged: no expected_failures and no verify is refused' { @(Test-CertManifest -Manifest (Read-CertYaml (Join-Path $fixMod 'module.yaml')) -Folder $fixMod) -like '*expected_failures or verify*' }
+
+$pool = @($mods | Where-Object Id -eq 'password-pool')[0]
+Assert 'password-pool is a valid fixture' { $pool.Valid -and $pool.Kind -eq 'fixture' }
+$pp = Get-CertModulePlan -Module $pool -Lab $L
+Assert 'defaults fill in: 50 users, 10/15/15, no seed' { $pp.Errors.Count -eq 0 -and $pp.Options.total -eq 50 -and $pp.Options.locked_percent -eq 10 -and $pp.Options.expired_percent -eq 15 -and $pp.Options.must_change_percent -eq 15 -and $pp.Options.never_expires_percent -eq 0 -and $null -eq $pp.Options.seed }
+Assert 'the summary names the pool OU from the inventory' { @($pp.Summary -like "*OU=PasswordPool,OU=People,DC=ad,DC=example,DC=com*").Count -eq 1 }
+Assert 'the summary gives the counts: 34 normal, 8 expired, 8 must change, 5 locked' { @($pp.Summary -like '*50: 34 normal*8 expired, 8 change at next logon*').Count -eq 1 -and @($pp.Summary -like '*5 locked out*').Count -eq 1 }
+Assert 'options_check: expired + must change over 100% is refused' { @((Get-CertModulePlan -Module $pool -Options @{ expired_percent = 60; must_change_percent = 50 }).Errors -like '*110%*').Count -eq 1 }
+Assert 'options_check: never expires counted in that 100% too' { @((Get-CertModulePlan -Module $pool -Options @{ expired_percent = 50; must_change_percent = 40; never_expires_percent = 20 }).Errors -like '*never expires is 110%*').Count -eq 1 }
+Assert 'options_check: cannot-change needs users who are not must-change' { @((Get-CertModulePlan -Module $pool -Options @{ total = 10; expired_percent = 0; must_change_percent = 100; cannot_change_percent = 10 }).Errors -like '*Cannot change password*').Count -eq 1 }
+Assert 'a range error is reported before options_check runs' { $e = @((Get-CertModulePlan -Module $pool -Options @{ total = 0 }).Errors); $e.Count -eq 1 -and $e[0] -like 'total must be 1 to 5000*' }
+Assert-Throws 'Start-CertRun refuses invalid options before anything else' { Start-CertRun -Config $config -Lab $L -Module $pool -Options @{ total = 9999 } } "*options aren't valid, so nothing was done*"
+Assert-Throws 'Start-CertRun refuses a blind fixture' { Start-CertRun -Config $config -Lab $L -Module $pool -Blind } '*is a fixture*blind*'
+
+. (Join-Path $certRoot 'modules/password-pool/pool.ps1')
+$plan50 = New-PoolPlan -Options $pp.Options -Seed 7
+$byState = @{}; foreach ($u in $plan50.Users) { $byState[$u.State] = 1 + [int] $byState[$u.State] }
+Assert 'pool: 50 at the defaults is exactly 34 normal, 8 expired, 8 must change' { $byState.Normal -eq 34 -and $byState.Expired -eq 8 -and $byState.MustChange -eq 8 -and -not $byState.NeverExpires }
+Assert 'pool: exactly 5 locked' { @($plan50.Users | Where-Object Locked).Count -eq 5 }
+Assert 'pool: normal users spread over the 3/30/180-day tiers' { (@($plan50.Users | Where-Object State -eq 'Normal' | Group-Object Tier | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ',') -eq 'Exp180=11,Exp3=12,Exp30=11' }
+Assert 'pool: expired users in their own tier, must-change in Base' { -not @($plan50.Users | Where-Object { ($_.State -eq 'Expired' -and $_.Tier -ne 'Expired') -or ($_.State -eq 'MustChange' -and $_.Tier -ne 'Base') }) }
+Assert 'pool: half of those who can sign in get a logon; no must-change user does' { @($plan50.Users | Where-Object LogOn).Count -eq 21 -and -not @($plan50.Users | Where-Object { $_.LogOn -and $_.State -eq 'MustChange' }) }
+Assert 'pool: the same seed gives the same plan, another seed another' { ((New-PoolPlan -Options $pp.Options -Seed 7).Users | ConvertTo-Json) -eq ($plan50.Users | ConvertTo-Json) -and ((New-PoolPlan -Options $pp.Options -Seed 8).Users | ConvertTo-Json) -ne ($plan50.Users | ConvertTo-Json) }
+$big = New-PoolPlan -Options ([ordered]@{ total = 5000; locked_percent = 10; expired_percent = 15; must_change_percent = 15; never_expires_percent = 5; cannot_change_percent = 20 }) -Seed 1
+Assert 'pool: 5000 users, unique names of 20 characters at most' { @($big.Users.Sam | Sort-Object -Unique).Count -eq 5000 -and ($big.Users.Sam | ForEach-Object Length | Measure-Object -Maximum).Maximum -le 20 }
+Assert 'pool: cannot-change users are never must-change; never-expires in Base' { @($big.Users | Where-Object CannotChange).Count -eq 1000 -and -not @($big.Users | Where-Object { $_.CannotChange -and $_.State -eq 'MustChange' }) -and -not @($big.Users | Where-Object { $_.State -eq 'NeverExpires' -and $_.Tier -ne 'Base' }) }
+$c1 = Get-PoolCounts -Options ([ordered]@{ total = 1; locked_percent = 0; expired_percent = 50; must_change_percent = 50; never_expires_percent = 0; cannot_change_percent = 0 })
+Assert 'pool: rounding never makes more users than asked for' { $c1.Expired + $c1.MustChange + $c1.Normal -eq 1 -and $c1.Normal -eq 0 }
 
 Write-Host 'Updates from a source'
 $origin = Join-Path $tmp 'origin.git'; $work = Join-Path $tmp 'work'
@@ -435,6 +506,28 @@ Assert 'report has the module and timeline' { $rep -match 'gpo-deleted' -and $re
 Assert 'no solution in the report while the run is open' { $rep -notmatch 'Reference solution' }
 $run.state = 'Reverted'
 Assert 'solution included once reverted' { (Get-Content (Write-CertReport -Config $config -Run $run) -Raw) -match 'Reference solution' }
+
+Write-Host 'Fixture runs'
+$fixDir = Join-Path $tmp 'fixture-verify'
+New-Item -ItemType Directory -Path $fixDir -Force | Out-Null
+Set-Content (Join-Path $fixDir 'verify.ps1') @'
+param($Context)
+New-CertCheck -Name 'users' -Passed $true -Detail "total=$($Context.Options.total)" -Severity Medium
+New-CertCheck -Name 'locked-out' -Passed ($Context.Options.total -ne 13) -Detail 'planned 5, actual 4' -Severity Medium
+'@
+$fm = [pscustomobject]@{ Manifest = [pscustomobject]@{ kind = 'fixture'; expected_failures = @(); verify = 'verify.ps1' }; Path = $fixDir }
+$fixRun = [pscustomobject]@{ id = 'CERT-261127-2200-00'; state = 'Built'; blind = $false; targets = [pscustomobject]@{}; expected = @(); checks = @(); timeline = @(); updated_utc = $null; options = [pscustomobject]@{ total = 50 }
+    module = [pscustomobject]@{ id = 'fix'; name = 'Fixture'; version = '1.0.0'; kind = 'fixture'; source = 'cert'; path = $fixDir }; lab = [pscustomobject]@{ site = 's'; release = 'r'; version = '1.6' }; set = @(); snapshot = [pscustomobject]@{ name = 'CERT-261127-2200-00' }; notes = @(); engagement = $null; assessor = $null; cert = '0.3.0'; owner = 't' }
+Assert 'a fixture that reads back as planned passes, and the options reach verify' { (Test-CertBreak -Config $config -Lab $L -Run $fixRun -Module $fm 6>$null) -and $fixRun.timeline[-1].event -eq 'fixture checked' -and $fixRun.timeline[-1].detail -eq 'all 2 check(s) match' -and $fixRun.checks[-1].results[0].detail -eq 'total=50' }
+$fixRun.options = [pscustomobject]@{ total = 13 }
+Assert 'a mismatch is a warning, kept in the checks' { -not (Test-CertBreak -Config $config -Lab $L -Run $fixRun -Module $fm 6>$null 3>$null) -and $fixRun.timeline[-1].detail -like "1 of 2 check(s) don't match: locked-out" -and @($fixRun.checks).Count -eq 2 }
+Assert-Throws 'a fixture has no repair to check' { Test-CertRepair -Config $config -Lab $L -Run $fixRun -Module $fm } '*is a fixture*no repair*'
+Assert-Throws 'nor a clock' { Start-CertClock -Config $config -Run $fixRun } '*fixture*no clock*'
+Save-CertRun -Config $config -Run $fixRun
+Set-Content (Join-Path (Get-CertRunsPath -Config $config) "$($fixRun.id)/password-pool.csv") 'x'
+$frep = Get-Content (Write-CertReport -Config $config -Run $fixRun) -Raw
+Assert 'fixture report: no time to repair; a Fixture section with the last read-back and the file' { $frep -notmatch 'Time to repair' -and $frep -match '## Fixture' -and $frep -match '\| locked-out \| warning \| planned 5, actual 4 \|' -and $frep -match 'password-pool\.csv' -and $frep -match '\| Options \| total=13 \|' -and $frep -notmatch 'Last repair check' }
+Assert 'a scenario report is unchanged: no Fixture section' { (Get-Content (Write-CertReport -Config $config -Run $run) -Raw) -notmatch '## Fixture' }
 
 Write-Host 'Odds and ends'
 $pw = 1..20 | ForEach-Object { New-CertPassword }
