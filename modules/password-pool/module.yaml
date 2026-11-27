@@ -1,5 +1,5 @@
 id: password-pool
-version: 1.0.0
+version: 1.0.1
 name: Password pool
 summary: A pool of AD users in known password and lockout states, to check what a reporting tool says
 kind: fixture

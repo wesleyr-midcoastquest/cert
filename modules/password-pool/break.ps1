@@ -173,17 +173,36 @@ $r = Invoke-CertTarget -Context $Context -Instance $Context.Targets.dc -Argument
 
     # 5. Real logons (dates option C): a successful bind on the PDC sets
     # lastLogon and, for an account that never had one, lastLogonTimestamp.
+    # The bind is a plain .NET LdapConnection, not a DirectoryEntry: Windows
+    # PowerShell's ADSI adapter binds again for any member called on a
+    # DirectoryEntry, Dispose() included, so a wrong password threw a second
+    # time from the finally block and stopped the whole build. A failed bind
+    # here is a result with the reason (e.g. "data 52e" bad password, "773"
+    # must change, "532" expired), never an error.
+    Add-Type -AssemblyName System.DirectoryServices.Protocols
     $netbios = $domain.NetBIOSName
-    $domainDn = $domain.DistinguishedName
     function Test-PoolBind([string] $Sam, [string] $Password) {
-        $de = $null
-        try { $de = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$pdc/$domainDn", "$netbios\$Sam", $Password); $null = $de.NativeGuid; $true }
-        catch { $false }
-        finally { if ($de) { $de.Dispose() } }
+        $c = $null
+        try {
+            $c = New-Object System.DirectoryServices.Protocols.LdapConnection($pdc)
+            $c.AuthType = [System.DirectoryServices.Protocols.AuthType]::Negotiate
+            $c.Bind((New-Object System.Net.NetworkCredential($Sam, $Password, $netbios)))
+            [pscustomobject]@{ Ok = $true; Reason = $null }
+        } catch {
+            # PowerShell wraps .NET method errors; find the LdapException inside.
+            $e = $_.Exception
+            while ($e -and $e.GetType().FullName -ne 'System.DirectoryServices.Protocols.LdapException') { $e = $e.InnerException }
+            if ($e) {
+                $msg = if ($e.ServerErrorMessage) { $e.ServerErrorMessage } else { $e.Message }
+                [pscustomobject]@{ Ok = $false; Reason = ("$($e.ErrorCode) $msg").Trim() }
+            }
+            else { [pscustomobject]@{ Ok = $false; Reason = $_.Exception.Message } }
+        } finally { if ($null -ne $c) { try { $c.Dispose() } catch { } } }
     }
     $logons = 0
     foreach ($u in @($Users | Where-Object LogOn)) {
-        if (Test-PoolBind $u.Sam $passwords[$u.Sam]) { $logons++ } else { $warnings.Add("$($u.Sam): the planned logon failed.") }
+        $b = Test-PoolBind $u.Sam $passwords[$u.Sam]
+        if ($b.Ok) { $logons++ } else { $warnings.Add("$($u.Sam): the planned logon failed: $($b.Reason)") }
     }
     Say "real logons: $logons"
 
@@ -191,16 +210,19 @@ $r = Invoke-CertTarget -Context $Context -Instance $Context.Targets.dc -Argument
     $expiredSams = @($Users | Where-Object Tier -eq 'Expired' | ForEach-Object Sam)
     if ($expiredSams) { Set-PoolMembers 'Expired' $expiredSams; Say "expired tier: $($expiredSams.Count) users" }
 
-    # 7. Lockouts, last, with every membership in place.
+    # 7. Lockouts, last, with every membership in place. One account that
+    # misbehaves is a warning, not a failed build.
     $locked = 0
     foreach ($u in @($Users | Where-Object Locked)) {
-        $bad = 'Wrong-' + [guid]::NewGuid().ToString('N')
-        $ok = $false
-        for ($k = 1; $k -le ($S.LockoutThreshold * 3); $k++) {
-            $null = Test-PoolBind $u.Sam $bad
-            if ((Get-ADUser -Identity $u.Sam -Properties LockedOut -Server $pdc).LockedOut) { $ok = $true; break }
-        }
-        if ($ok) { $locked++ } else { $warnings.Add("$($u.Sam) did not lock out after $($S.LockoutThreshold * 3) bad passwords.") }
+        try {
+            $bad = 'Wrong-' + [guid]::NewGuid().ToString('N')
+            $ok = $false
+            for ($k = 1; $k -le ($S.LockoutThreshold * 3); $k++) {
+                $null = Test-PoolBind $u.Sam $bad
+                if ((Get-ADUser -Identity $u.Sam -Properties LockedOut -Server $pdc).LockedOut) { $ok = $true; break }
+            }
+            if ($ok) { $locked++ } else { $warnings.Add("$($u.Sam) did not lock out after $($S.LockoutThreshold * 3) bad passwords.") }
+        } catch { $warnings.Add("$($u.Sam): locking it out failed: $($_.Exception.Message)") }
     }
     Say "locked out: $locked"
     $passwords.Clear()
