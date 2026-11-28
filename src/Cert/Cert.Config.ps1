@@ -47,15 +47,28 @@ function Get-CertLab {
     [CmdletBinding()]
     param([Parameter(Mandatory)] $Config)
     $root = [string] $Config.lab_repo
-    $product = Join-Path $root 'inventory/lab.yaml'
-    $site    = Join-Path $root 'inventory/site.yaml'
-    $ledger  = Join-Path $root 'inventory/instances.yaml'
-    foreach ($f in $product, $site, $ledger) {
+    $product   = Join-Path $root 'inventory/lab.yaml'
+    $invModule = Join-Path $root 'platform/modules/Lab.Inventory/Lab.Inventory.psm1'
+    foreach ($f in $product, $invModule) {
         if (-not (Test-Path $f)) { throw "Lab file not found: $f. Set lab_repo in cert.config.yaml to the lab repo on this MGMT." }
     }
     # The lab's own resolver: the one place lab.yaml and site.yaml are merged.
-    $invModule = Join-Path $root 'platform/modules/Lab.Inventory/Lab.Inventory.psm1'
     Import-Module $invModule -Force -DisableNameChecking -Global -ErrorAction Stop
+    # Where the site's files are is the lab's decision (site\ since
+    # LAB-261128-00, inventory\ before), so CERT reads the same files as the
+    # pipeline. Its errors (two site.yaml files, MIDCOAST_LAB_SITE on MGMT)
+    # pass through unchanged. A lab older than LAB-261128-00 has no
+    # Get-LabSiteFile and keeps its site files in inventory\.
+    if (Get-Command Get-LabSiteFile -ErrorAction SilentlyContinue) {
+        $site   = Get-LabSiteFile -RepoRoot $root -Name site
+        $ledger = Get-LabSiteFile -RepoRoot $root -Name ledger
+    } else {
+        $site   = Join-Path $root 'inventory/site.yaml'
+        $ledger = Join-Path $root 'inventory/instances.yaml'
+    }
+    foreach ($f in $site, $ledger) {
+        if (-not (Test-Path $f)) { throw "Site file not found: $f. The lab keeps site.yaml and instances.yaml together in its site folder (lab CHANGELOG, LAB-261128-00)." }
+    }
     $inventory = Import-LabInventory -ProductPath $product -SitePath $site
     $raw = Get-Content -Path $ledger -Raw -Encoding UTF8
     [pscustomobject]@{

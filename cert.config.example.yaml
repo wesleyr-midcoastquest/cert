@@ -2,8 +2,9 @@
 # this file to cert.config.yaml (gitignored, so updates never touch it) and
 # keep only the lines you change.
 
-# The lab repo on this MGMT. CERT reads inventory/lab.yaml, inventory/site.yaml
-# and inventory/instances.yaml from it, and never writes to it.
+# The lab repo on this MGMT. CERT reads inventory/lab.yaml from it, and the
+# site's site.yaml and instances.yaml from wherever the lab keeps them (site\
+# since LAB-261128-00, inventory\ before). It never writes to the lab repo.
 lab_repo: C:\MidCoastLab\repo
 
 # One folder per run (run.json, report.md). Relative paths are under the CERT folder.
