@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.5.1 (Nov 2026): reads the lab's site folder
+
+- **CERT reads the lab's site folder (LAB-261128-00); the old `inventory/`
+  layout still works**
+  ([cert#3](https://github.com/MidCoast-Labs/cert/issues/3)). The lab's
+  release LAB-261128-00 moved a site's `site.yaml` and ledger
+  `instances.yaml` into `site\`. CERT looked only in `inventory\`, so on a
+  lab that had moved them it stopped at start-up with `Lab file not found:
+  ...\inventory\site.yaml. Set lab_repo in cert.config.yaml ...`, which
+  changing `lab_repo` couldn't fix. CERT now asks the lab's own
+  `Get-LabSiteFile` (Lab.Inventory) where the site's files are, so it reads
+  the same files as the pipeline: `site\`, else `inventory\` (the lab
+  warns once that it's the old layout), and `MIDCOAST_LAB_SITE` on a
+  workstation. The lab's errors (two `site.yaml` files; `MIDCOAST_LAB_SITE`
+  set on MGMT) are shown as they are. A lab older than LAB-261128-00 is read
+  from `inventory\` as before.
+- A missing `site.yaml` or `instances.yaml` now says `Site file not found:`
+  with the path and points to the lab CHANGELOG (LAB-261128-00) instead of
+  `lab_repo`. A wrong `lab_repo` (no `inventory\lab.yaml` or Lab.Inventory
+  module) still says to set `lab_repo`.
+- No new setting: `lab_repo` is still the only one, and CERT still never
+  writes to the lab repo. Only the comment in `cert.config.example.yaml`
+  changes.
+- **Update CERT together with the lab.** CERT 0.5.0 and earlier stop at
+  start-up once a lab's site files are in `site\`.
+- No module changes: every module's `requires.cert` is still met.
+
 ## 0.5.0 (Nov 2026): a readable module list
 
 - **List modules** and the picker in **Start a scenario**

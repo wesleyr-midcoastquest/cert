@@ -14,6 +14,8 @@
 [CmdletBinding()]
 param([Parameter(Mandatory)] [string] $LabRoot)
 $ErrorActionPreference = 'Stop'
+# The lab follows MIDCOAST_LAB_SITE when it's set; the tests use the fake lab's own site\ folder.
+$env:MIDCOAST_LAB_SITE = $null
 $certRoot = Split-Path $PSScriptRoot -Parent
 Import-Module (Join-Path $certRoot 'src/Cert/Cert.psm1') -Force -DisableNameChecking
 $cert = Get-Module Cert
@@ -33,9 +35,9 @@ function Assert-Throws([string] $Name, [scriptblock] $Test, [string] $Like = '*'
 # ── A fake lab on disk ────────────────────────────────────────────────────
 $tmp = Join-Path ([IO.Path]::GetTempPath()) "cert-tests-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
 $lab = Join-Path $tmp 'lab'
-foreach ($d in 'inventory', 'platform/modules/Lab.Inventory', 'platform/validation') { New-Item -ItemType Directory -Path (Join-Path $lab $d) -Force | Out-Null }
+foreach ($d in 'inventory', 'site', 'platform/modules/Lab.Inventory', 'platform/validation') { New-Item -ItemType Directory -Path (Join-Path $lab $d) -Force | Out-Null }
 Copy-Item (Join-Path $LabRoot 'inventory/lab.yaml') (Join-Path $lab 'inventory/lab.yaml')
-Copy-Item (Join-Path $LabRoot 'inventory/site.example.yaml') (Join-Path $lab 'inventory/site.yaml')
+Copy-Item (Join-Path $LabRoot 'inventory/site.example.yaml') (Join-Path $lab 'site/site.yaml')
 Copy-Item (Join-Path $LabRoot 'platform/modules/Lab.Inventory/Lab.Inventory.psm1') (Join-Path $lab 'platform/modules/Lab.Inventory/')
 Copy-Item (Join-Path $LabRoot 'platform/validation/catalog.psd1') (Join-Path $lab 'platform/validation/')
 @'
@@ -72,7 +74,7 @@ instances:
   ipv4: 10.50.10.40
   state: active
 templates: []
-'@ | Set-Content (Join-Path $lab 'inventory/instances.yaml')
+'@ | Set-Content (Join-Path $lab 'site/instances.yaml')
 
 $cfgPath = Join-Path $tmp 'cert.config.yaml'
 @"
@@ -91,10 +93,35 @@ Assert 'arrays come from the defaults' { @($config.assessor.allow) -contains 'wi
 $L = Get-CertLab -Config $config
 Assert 'lab resolves through the lab''s own Lab.Inventory' { $L.Inventory.identity.active_directory.domain -eq 'ad.example.com' -and $L.Inventory.proxmox.node -eq 'pve01' }
 Assert 'ledger read' { @($L.Instances).Count -eq 4 }
-Assert 'ledger hash ignores line endings' { $L.LedgerHash -eq (Get-CertTextHash -Text ((Get-Content (Join-Path $lab 'inventory/instances.yaml') -Raw) -replace "`n", "`r`n")) }
+Assert 'ledger hash ignores line endings' { $L.LedgerHash -eq (Get-CertTextHash -Text ((Get-Content (Join-Path $lab 'site/instances.yaml') -Raw) -replace "`n", "`r`n")) }
 Assert 'compatibility of the lab this CERT targets' { (Test-CertLabCompatibility -Lab $L).Ok }
 Assert 'another major is refused' { -not (Test-CertLabCompatibility -Lab ([pscustomobject]@{ Version = '2.0'; Release = 'x' })).Ok }
 Assert 'another minor warns' { $c = Test-CertLabCompatibility -Lab ([pscustomobject]@{ Version = '1.7'; Release = 'x' }); $c.Ok -and $c.Message -like '*Expected to work*' }
+
+# The site's files: site\ (LAB-261128-00), or inventory\ in the old layout.
+# Each case is a copy of the fake lab in its own folder.
+function New-ScratchLab([string] $Name) {
+    $d = Join-Path $tmp $Name
+    Copy-Item $lab $d -Recurse
+    $c = Merge-CertObject -Base $config -Overlay ([pscustomobject]@{ lab_repo = $d })
+    @{ Root = $d; Config = $c }
+}
+$old = New-ScratchLab 'lab-old-layout'
+Move-Item (Join-Path $old.Root 'site/site.yaml') (Join-Path $old.Root 'inventory/site.yaml')
+Move-Item (Join-Path $old.Root 'site/instances.yaml') (Join-Path $old.Root 'inventory/instances.yaml')
+Assert 'the old inventory\ layout still resolves, same ledger hash' {
+    $x = Get-CertLab -Config $old.Config 3>$null
+    $x.LedgerPath -eq (Join-Path $old.Root 'inventory/instances.yaml') -and $x.LedgerHash -eq $L.LedgerHash -and $x.Site -eq $L.Site
+}
+Assert 'the new layout reads site\' { $L.LedgerPath -eq (Join-Path $lab 'site/instances.yaml') }
+$both = New-ScratchLab 'lab-two-sites'
+Copy-Item (Join-Path $both.Root 'site/site.yaml') (Join-Path $both.Root 'inventory/site.yaml')
+Assert-Throws 'two site.yaml files: refused with the lab''s message' { Get-CertLab -Config $both.Config } -Like 'Two site.yaml files*'
+$noLedger = New-ScratchLab 'lab-no-ledger'
+Remove-Item (Join-Path $noLedger.Root 'site/instances.yaml')
+Assert-Throws 'no ledger: names the file and the site folder' { Get-CertLab -Config $noLedger.Config } -Like "Site file not found: *instances.yaml*LAB-261128-00*"
+# Back to the fake lab's own Lab.Inventory for the rest.
+$L = Get-CertLab -Config $config
 $as = Get-CertAssessor -Config $config -Lab $L
 Assert 'by default the fixer works on MGMT' { $as.IsMgmt -and $as.Address -eq '10.50.10.31' -and -not $as.Fallback }
 $cfgW11 = Merge-CertObject -Base $config -Overlay ([pscustomobject]@{ assessor = [pscustomobject]@{ role = 'W11' } })
