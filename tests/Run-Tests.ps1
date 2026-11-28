@@ -165,6 +165,25 @@ Invoke-CertTarget -Context $Context -Instance $x -ArgumentList $names, $more -Sc
 $nested = @(Test-CertManifest -Manifest (Read-CertYaml (Join-Path $broken 'module.yaml')) -Folder $broken | Where-Object { $_ -like '*array inside an array*' })
 Assert 'one of several arguments wrapped as (, $x) is a problem; a lone one is not' { $nested.Count -eq 2 -and @($nested -like 'break.ps1: line 2:*').Count -eq 2 }
 
+Write-Host 'Module list (menu)'
+$words = { param($s) @($s -split '\s+' | Where-Object { $_ }) }
+$list80 = @(Format-CertModuleList -Modules $mods -Width 80)
+Assert 'width 80: no line of the built-in list is longer than 80' { $list80.Count -gt $mods.Count -and @($list80 | Where-Object { $_.Text.Length -gt 80 }).Count -eq 0 }
+Assert 'built-in modules: no cert/ prefix, one header per module' { @($list80 | Where-Object Text -like '*cert/*').Count -eq 0 -and @($list80 | Where-Object { $_.Text -match '^  \S' }).Count -eq $mods.Count }
+Assert 'every summary is shown whole, indented 6' { $all = ($list80 | Where-Object { $_.Text -match '^      \S' } | ForEach-Object { $_.Text.Trim() }) -join ' '; @($mods | Where-Object { $all -notlike "*$(@(& $words $_.Summary) -join ' ')*" }).Count -eq 0 }
+$long = ('word ' * 19) + 'final'   # 100 characters
+$one = [pscustomobject]@{ Id = 'long-summary'; Version = '1.0.0'; Category = 'Other'; Difficulty = 2; Summary = $long; Source = 'extra'; Problems = @() }
+$ll = @(Format-CertModuleList -Modules @($one) -Width 40)
+Assert 'a 100-character summary wraps at a space and loses no words' { $long.Length -eq 100 -and $ll.Count -ge 4 -and @($ll[1..($ll.Count - 1)] | Where-Object { $_.Text.Length -gt 40 -or $_.Text -notmatch '^      \S.*\S$' }).Count -eq 0 -and ((@($ll[1..($ll.Count - 1)].Text | ForEach-Object { $_.Trim() }) -join ' ') -eq $long) }
+Assert 'a module from another source shows (from <source>)' { $ll[0].Text -like '  long-summary (from extra)  1.0.0  Other  difficulty 2' }
+$sick = [pscustomobject]@{ Id = 'sick'; Version = '?'; Category = ''; Difficulty = 0; Summary = ''; Source = 'cert'; Problems = @('category ''Weather'': one of ActiveDirectory, DNS, GroupPolicy, Replication, Time, Identity, Other', 'difficulty: 1 to 5') }
+$sl = @(Format-CertModuleList -Modules @($sick) -Width 60)
+Assert 'a module with problems lists them, wrapped and marked' { $p = @($sl | Where-Object IsProblem); $p.Count -ge 3 -and @($p | Where-Object { $_.Text -like '      problem: *' }).Count -eq 2 -and @($p | Where-Object { $_.Text.Length -gt 60 }).Count -eq 0 -and -not $sl[0].IsProblem -and $sl[0].Text -like '*difficulty ?' }
+$many = @(1..12 | ForEach-Object { [pscustomobject]@{ Id = "m$_"; Version = '1.0.0'; Category = 'DNS'; Difficulty = 1; Summary = "Module $_"; Source = 'cert'; Problems = @() } })
+$nl = @(Format-CertModuleList -Modules $many -Width 80 -Numbered | Where-Object { $_.Text -match '^\s*\d+\. ' })
+Assert 'numbered: 1..n in order, each against its own module, ids lined up over the summary' { $nl.Count -eq 12 -and @(for ($k = 0; $k -lt 12; $k++) { if ($nl[$k].Text -notmatch "^\s*$($k + 1)\. m$($k + 1)\s") { $k } }).Count -eq 0 -and @($nl | Where-Object { $_.Text.IndexOf('m') -ne 6 }).Count -eq 0 }
+Assert 'nothing to list, nothing returned' { @(Format-CertModuleList -Modules @() -Width 80).Count -eq 0 }
+
 Write-Host 'Options and fixtures'
 Assert 'existing modules are scenarios with no options' { @($mods | Where-Object { $_.Id -ne 'password-pool' -and ($_.Kind -ne 'scenario' -or @($_.Manifest.options | Where-Object { $_ }).Count) }).Count -eq 0 }
 $gpo = @($mods | Where-Object Id -eq 'gpo-deleted')[0]

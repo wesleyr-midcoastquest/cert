@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.0 (Nov 2026): a readable module list
+
+- **List modules** and the picker in **Start a scenario**
+  ([cert#2](https://github.com/MidCoast-Labs/cert/issues/2)) showed each
+  module on one line of about 150 characters, which wrapped in the middle of
+  the summary in a normal window. Each module is now a header line (number,
+  id, version, category, difficulty; columns as wide as the longest value)
+  with the summary, and any problems, word-wrapped on their own indented
+  lines to fit the window (120 columns when there's no window to measure).
+  Modules from this repo no longer show the `cert/` prefix; a module from
+  another source shows `(from <source>)` after its id. The numbers in the
+  picker are unchanged. `Format-CertModuleList` builds the list.
+- No module changes: every module's `requires.cert` is still met.
+
 ## 0.3.1 (Nov 2026): password-pool can finish its build
 
 - **password-pool 1.0.1**
