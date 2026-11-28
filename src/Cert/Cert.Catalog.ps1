@@ -56,7 +56,7 @@ function Test-CertManifest {
     elseif ($m.id -ne $leaf) { $e.Add("id '$($m.id)' must match its folder name '$leaf'") }
     if ($m.version -notmatch '^\d+\.\d+\.\d+$') { $e.Add("version '$($m.version)': use x.y.z") }
     foreach ($k in 'name', 'summary') { if (-not $m.$k) { $e.Add("$k is required") } }
-    if ($m.summary -and $m.summary.Length -gt 100) { $e.Add('summary: 100 characters at most (it is one menu line)') }
+    if ($m.summary -and $m.summary.Length -gt 100) { $e.Add('summary: 100 characters at most') }
     if ($m.category -notin $script:Categories) { $e.Add("category '$($m.category)': one of $($script:Categories -join ', ')") }
     if (-not ($m.difficulty -as [int]) -or [int] $m.difficulty -lt 1 -or [int] $m.difficulty -gt 5) { $e.Add('difficulty: 1 to 5') }
     if ($m.destructive -isnot [bool]) { $e.Add('destructive: true or false') }
@@ -183,6 +183,59 @@ function Get-CertModules {
                 Manifest   = $m
                 Problems   = $problems
                 Valid      = ($problems.Count -eq 0)
+            }
+        }
+    }
+}
+
+function ConvertTo-CertWrappedLines {
+    # Word-wraps text to lines of at most $Width characters, breaking at
+    # spaces; a word longer than a line is split. No words are lost.
+    param([string] $Text, [int] $Width)
+    $Width = [math]::Max($Width, 10)
+    $line = ''
+    foreach ($w in @($Text -split '\s+' | Where-Object { $_ })) {
+        while ($w.Length -gt $Width) {
+            if ($line) { $line; $line = '' }
+            $w.Substring(0, $Width); $w = $w.Substring($Width)
+        }
+        if (-not $line) { $line = $w }
+        elseif ($line.Length + 1 + $w.Length -le $Width) { $line = "$line $w" }
+        else { $line; $line = $w }
+    }
+    if ($line) { $line }
+}
+
+function Format-CertModuleList {
+    # The module list as the menu shows it (List modules, and the picker in
+    # Start a scenario): per module a header line (number, id, version,
+    # category, difficulty), then the summary and any problems on their own
+    # lines, indented 6 and word-wrapped to -Width. Column widths come from
+    # the longest value in the list. Returns @{ Text; IsProblem } objects and
+    # writes nothing, so the caller chooses the colours.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [AllowEmptyCollection()] $Modules, [int] $Width = 120, [switch] $Numbered)
+    $list = @($Modules | Where-Object { $_ })
+    if (-not $list.Count) { return }
+    $indent = 6
+    $names = @($list | ForEach-Object { if ($_.Source -and $_.Source -ne 'cert') { "$($_.Id) (from $($_.Source))" } else { [string] $_.Id } })
+    $wName = ($names | Measure-Object -Property Length -Maximum).Maximum
+    $wVer  = (@($list | ForEach-Object { ([string] $_.Version).Length }) | Measure-Object -Maximum).Maximum
+    $wCat  = (@($list | ForEach-Object { ([string] $_.Category).Length }) | Measure-Object -Maximum).Maximum
+    $wNum  = ([string] $list.Count).Length
+    for ($i = 0; $i -lt $list.Count; $i++) {
+        $m = $list[$i]
+        # Numbered: the number ends at column 5, so the id lines up over the summary.
+        $lead = if ($Numbered) { (' ' * [math]::Max(0, $indent - 2 - $wNum)) + ([string] ($i + 1)).PadLeft($wNum) + '. ' } else { '  ' }
+        $diff = if ([int] $m.Difficulty -gt 0) { "difficulty $($m.Difficulty)" } else { 'difficulty ?' }
+        $text = $lead + $names[$i].PadRight($wName) + '  ' + ([string] $m.Version).PadRight($wVer) + '  ' + ([string] $m.Category).PadRight($wCat) + '  ' + $diff
+        [pscustomobject]@{ Text = $text -replace '\s+$', ''; IsProblem = $false }
+        foreach ($l in ConvertTo-CertWrappedLines -Text ([string] $m.Summary) -Width ($Width - $indent)) {
+            [pscustomobject]@{ Text = (' ' * $indent) + $l; IsProblem = $false }
+        }
+        foreach ($p in @($m.Problems | Where-Object { $_ })) {
+            foreach ($l in ConvertTo-CertWrappedLines -Text "problem: $p" -Width ($Width - $indent)) {
+                [pscustomobject]@{ Text = (' ' * $indent) + $l; IsProblem = $true }
             }
         }
     }

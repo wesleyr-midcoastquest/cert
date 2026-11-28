@@ -27,7 +27,7 @@ CI runs the same check on every pull request.
 id: gpo-deleted                 # lower case, digits, dashes; the folder's name
 version: 1.0.0                  # x.y.z; raise it with every change (Update shows old -> new)
 name: GPO deleted               # a title
-summary: The DCs' LAPS/DSRM policy was deleted; a recent GPO backup exists on the PDC   # one menu line, 100 characters at most
+summary: The DCs' LAPS/DSRM policy was deleted; a recent GPO backup exists on the PDC   # shown under the module's name in the menu, 100 characters at most
 category: GroupPolicy           # ActiveDirectory | DNS | GroupPolicy | Replication | Time | Identity | Other
 kind: scenario                  # optional: scenario (the default) or fixture
 difficulty: 2                   # 1 (routine) to 5 (hard); surprise mode can cap it

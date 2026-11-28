@@ -46,11 +46,22 @@ function Show-Header($Config, $Lab, $Run) {
     Write-Host ''
 }
 
+function Get-ConsoleWidth {
+    # The window's width, or 120 when there's no console to ask (redirected output, CI).
+    try { $w = [int] $Host.UI.RawUI.WindowSize.Width } catch { $w = 0 }
+    if ($w -gt 0) { $w } else { 120 }
+}
+
+function Write-CertModuleList($Modules, [switch] $Numbered) {
+    foreach ($l in Format-CertModuleList -Modules $Modules -Width (Get-ConsoleWidth) -Numbered:$Numbered) {
+        if ($l.IsProblem) { Write-Host $l.Text -ForegroundColor Red } else { Write-Host $l.Text }
+    }
+}
+
 function Select-CertModule($Modules, [string] $Prompt = 'Module number') {
     $valid = @($Modules | Where-Object Valid)
     if (-not $valid) { Write-Warning 'No valid modules. Update modules, or see List for problems.'; return $null }
-    $i = 1
-    foreach ($m in $valid) { Write-Host ('  {0,2}. {1,-28} {2} (difficulty {3}) {4}' -f $i++, $m.Id, $m.Version, $m.Difficulty, $m.Summary) }
+    Write-CertModuleList $valid -Numbered
     $n = Read-Choice $Prompt
     if ($n -match '^\d+$' -and [int] $n -ge 1 -and [int] $n -le $valid.Count) { return $valid[[int] $n - 1] }
     $null
@@ -227,12 +238,7 @@ function Invoke-MainMenu($Config, $Lab, $Modules) {
     Write-Host '  R. Reload    Q. Quit'
     switch (Read-Choice 'Choice') {
         '1' { if (Invoke-UpdateMenu $Config) { return 'reimport' } }
-        '2' {
-            foreach ($m in $Modules) {
-                Write-Host ('  {0,-34} {1,-7} {2,-15} d{3}  {4}' -f $m.Key, $m.Version, $m.Category, $m.Difficulty, $m.Summary)
-                foreach ($p in $m.Problems) { Write-Host "      problem: $p" -ForegroundColor Red }
-            }
-        }
+        '2' { Write-CertModuleList $Modules }
         '3' {
             $m = Select-CertModule $Modules
             if ($m) {
